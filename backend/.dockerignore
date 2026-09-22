@@ -1,0 +1,10 @@
+.venv
+.venv-macos
+__pycache__
+*.pyc
+.pytest_cache
+tests
+uploads
+*.db
+.env
+.DS_Store

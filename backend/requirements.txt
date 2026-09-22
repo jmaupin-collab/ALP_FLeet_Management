@@ -1,0 +1,16 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+sqlalchemy>=2.0.36
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+email-validator>=2.2.0
+python-multipart>=0.0.12
+PyJWT>=2.10.0
+pwdlib[argon2]>=0.2.0
+python-dotenv>=1.0.1
+# PostgreSQL driver for the postgresql+psycopg:// URL used in production.
+psycopg[binary]>=3.2.0
+# Reverse geocoding in app/geocoding.py.
+requests>=2.32.0
+# S3/R2 storage backend in app/storage.py; imported lazily.
+boto3>=1.35.0

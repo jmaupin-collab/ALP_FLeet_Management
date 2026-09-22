@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.venv-*/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# SQLite. Unanchored so a database anywhere in the tree is excluded, not just
+# under backend/ — a root-level fleet.db was previously being committed.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Uploaded inspection photos
+backend/uploads/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Env
+.env
+.env.local
+
+# Local toolchain
+.tools/
+
+# OS / IDE
+.DS_Store
+.idea/
+.vscode/

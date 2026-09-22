@@ -1,0 +1,10 @@
+# Keep LF in the repository regardless of checkout platform. Without this a
+# Windows checkout rewrites every file and produces whole-file diffs.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.webp binary
+*.pdf binary
+*.db binary
