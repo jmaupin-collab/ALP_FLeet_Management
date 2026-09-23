@@ -56,17 +56,27 @@ def fleet(db_session):
         AssetOperationalStatus.DEPLOYED, CustodyType.WAREHOUSE_DEPOT, 26000,
     )
     in_transit = make_asset(
-        "KPITRANSIT001", AssetType.SEMI_TRUCK,
+        "KPITRANSIT001", AssetType.ALPR_TRAILER,
         AssetOperationalStatus.AVAILABLE, CustodyType.IN_TRANSIT, 90000,
     )
     maintenance = make_asset(
-        "KPIMAINT00001", AssetType.FLEET_VEHICLE,
+        "KPIMAINT00001", AssetType.ALPR_TRAILER,
         AssetOperationalStatus.MAINTENANCE, CustodyType.WAREHOUSE_DEPOT, 30000,
     )
     archived = make_asset(
-        "KPIARCHIVE001", AssetType.FLEET_VEHICLE,
+        "KPIARCHIVE001", AssetType.ALPR_TRAILER,
         AssetOperationalStatus.AVAILABLE, CustodyType.WAREHOUSE_DEPOT, 31000,
         archived=True,
+    )
+    # Non-ALPR types are tracked as inventory and must not reach the readiness
+    # counts, so they sit here purely to prove they are excluded.
+    truck = make_asset(
+        "KPITRUCK00001", AssetType.SEMI_TRUCK,
+        AssetOperationalStatus.AVAILABLE, CustodyType.WAREHOUSE_DEPOT, 120000,
+    )
+    vehicle = make_asset(
+        "KPIVEHICLE001", AssetType.FLEET_VEHICLE,
+        AssetOperationalStatus.MAINTENANCE, CustodyType.WAREHOUSE_DEPOT, 40000,
     )
     db_session.flush()
 
@@ -91,19 +101,31 @@ def fleet(db_session):
             opened_at=datetime.now(UTC),
         )
     )
+    db_session.add(
+        MaintenanceWorkOrder(
+            asset_id=vehicle.id,
+            organization_id=org.id,
+            title="Non-ALPR brakes",
+            status=WorkOrderStatus.COMPLETED,
+            downtime_hours=Decimal("99"),
+            opened_at=datetime.now(UTC),
+        )
+    )
     db_session.commit()
 
     return {"org": org, "deployed": deployed, "stale": stale, "in_transit": in_transit,
-            "maintenance": maintenance, "archived": archived}
+            "maintenance": maintenance, "archived": archived, "truck": truck, "vehicle": vehicle}
 
 
 def test_counts_match_per_asset_status(db_session, fleet):
     kpis = dashboard_kpis(db_session, fleet["org"].id)
 
+    # Readiness is ALPR-only, so the per-asset comparison is too.
     assets = db_session.scalars(
         select(Asset)
         .where(Asset.organization_id == fleet["org"].id)
         .where(Asset.is_archived.is_(False))
+        .where(Asset.asset_type == AssetType.ALPR_TRAILER)
     ).all()
 
     expected = {}
@@ -129,6 +151,7 @@ def test_stale_deployed_flag_counts_as_available(db_session, fleet):
 def test_archived_assets_are_excluded(db_session, fleet):
     kpis = dashboard_kpis(db_session, fleet["org"].id)
 
+    # Four live ALPR trailers; the archived one and both non-ALPR assets are out.
     assert kpis.fleet_size == 4
     assert Decimal(kpis.total_purchase_cost) == Decimal(25000 + 26000 + 90000 + 30000)
 
@@ -136,9 +159,10 @@ def test_archived_assets_are_excluded(db_session, fleet):
 def test_downtime_is_summed_from_work_orders(db_session, fleet):
     kpis = dashboard_kpis(db_session, fleet["org"].id)
 
+    # 12.5 from the ALPR trailer; the Fleet Vehicle's 99 hours must not appear.
     assert Decimal(kpis.downtime_hours_ytd) == Decimal("12.5")
-    vehicles = next(row for row in kpis.by_asset_type if row.asset_type == AssetType.FLEET_VEHICLE)
-    assert Decimal(vehicles.downtime_hours_ytd) == Decimal("12.5")
+    trailers = next(row for row in kpis.by_asset_type if row.asset_type == AssetType.ALPR_TRAILER)
+    assert Decimal(trailers.downtime_hours_ytd) == Decimal("12.5")
 
 
 def test_totals_reconcile_across_asset_types(db_session, fleet):

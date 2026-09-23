@@ -22,6 +22,7 @@ const ROLE_DESCRIPTIONS = {
 
 export default function Admin() {
   const [users, setUsers] = useState([]);
+  const [agencies, setAgencies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -45,6 +46,8 @@ export default function Admin() {
 
   useEffect(() => {
     load();
+    // Customer accounts are scoped to one agency, so the form needs the list.
+    api("/agencies").then(setAgencies).catch(() => setAgencies([]));
   }, []);
 
   async function saveUser(event) {
@@ -61,6 +64,10 @@ export default function Admin() {
       setError("Password must be at least 8 characters.");
       return;
     }
+    if (form.role === "customer" && !form.agency_id) {
+      setError("Customer accounts must be assigned to an agency.");
+      return;
+    }
 
     setBusy(true);
     setError("");
@@ -73,6 +80,8 @@ export default function Admin() {
             password: form.password,
             full_name: form.full_name,
             role: form.role,
+            // Only customers carry an agency; the server clears it otherwise.
+            agency_id: form.role === "customer" ? form.agency_id : null,
           }),
         });
         setSuccess("User created successfully.");
@@ -82,6 +91,7 @@ export default function Admin() {
           full_name: form.full_name,
           role: form.role,
           is_active: form.is_active,
+          agency_id: form.role === "customer" ? form.agency_id : null,
         };
         if (form.password) {
           updates.password = form.password;
@@ -292,6 +302,28 @@ export default function Admin() {
               </select>
               <p className="mt-1 text-xs text-slate-500">{ROLE_DESCRIPTIONS[form.role]}</p>
             </Field>
+            {form.role === "customer" ? (
+              <Field label="Agency">
+                <select
+                  className={inputClass}
+                  value={form.agency_id || ""}
+                  onChange={(e) => setForm({ ...form, agency_id: e.target.value })}
+                  required
+                >
+                  <option value="">-- Select an agency --</option>
+                  {agencies.map((agency) => (
+                    <option key={agency.id} value={agency.id}>
+                      {agency.name}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-slate-500">
+                  {agencies.length === 0
+                    ? "No agencies yet. Add one under Agencies first."
+                    : "This customer will only see assets currently assigned to this agency."}
+                </p>
+              </Field>
+            ) : null}
             {modal === "edit" ? (
               <Field label="Status">
                 <label className="flex items-center gap-2">

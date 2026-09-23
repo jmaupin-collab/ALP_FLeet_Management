@@ -11,6 +11,7 @@ import Attention from "./pages/Attention.jsx";
 import Dashboard from "./pages/Dashboard.jsx";
 import Deployments from "./pages/Deployments.jsx";
 import DirectoryPage from "./pages/DirectoryPage.jsx";
+import Documents from "./pages/Documents.jsx";
 import Inspections from "./pages/Inspections.jsx";
 import Login from "./pages/Login.jsx";
 import Maintenance from "./pages/Maintenance.jsx";
@@ -87,6 +88,7 @@ export default function App() {
           </Route>
 
           <Route element={<RequireRole allowed={MANAGERS} />}>
+            <Route path="/documents" element={<Documents />} />
             <Route path="/customer-access" element={<CustomerAccess />} />
           </Route>
 

@@ -9,6 +9,14 @@ import { api } from "../lib/api.js";
 import { ASSET_TYPES, CUSTODY_TYPES, DEPLOYMENT_STATUSES, OPEN_WO_STATUSES, OPERATIONAL_STATUSES, REPAIR_CHANNELS, WORK_ORDER_STATUSES } from "../lib/constants.js";
 
 const WAREHOUSE_STATUSES = OPERATIONAL_STATUSES.filter((status) => !["deployed", "in_transit"].includes(status));
+
+// The site you pick is the location, so each custody type points at its own
+// directory rather than asking for the same place twice.
+const SITE_FIELD = {
+  "Customer / LE Agency": { key: "agency_id", label: "Customer / Agency", directory: "agencies" },
+  "In Transit": { key: "warehouse_id", label: "Destination warehouse", directory: "warehouses" },
+  "Warehouse Depot": { key: "warehouse_id", label: "Warehouse", directory: "warehouses" },
+};
 import { Badge, hours, money } from "../lib/format.jsx";
 
 export default function AssetTimeline() {
@@ -126,7 +134,12 @@ export default function AssetTimeline() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-2xl font-semibold text-slate-900">{asset.make_model}</h2>
-            <p className="mt-1 font-mono text-xs text-slate-500">{asset.vin}</p>
+            <p className="mt-1 font-mono text-xs text-slate-500">
+              {asset.vin}
+              {asset.license_plate
+                ? ` · Plate ${asset.license_plate}${asset.license_plate_state ? ` (${asset.license_plate_state})` : ""}`
+                : ""}
+            </p>
             {asset.is_archived ? <p className="mt-2 text-sm font-semibold text-amber-800">Archived / retired</p> : null}
           </div>
           <Badge value={asset.asset_type} tone="type" />
@@ -262,12 +275,21 @@ export default function AssetTimeline() {
                         notes: "",
                       }
                     : key === "edit"
-                    ? { vin: asset.vin, make_model: asset.make_model, initial_purchase_cost: asset.initial_purchase_cost, asset_type: asset.asset_type }
+                    ? {
+                        vin: asset.vin,
+                        license_plate: asset.license_plate || "",
+                        license_plate_state: asset.license_plate_state || "",
+                        make_model: asset.make_model,
+                        initial_purchase_cost: asset.initial_purchase_cost,
+                        asset_type: asset.asset_type,
+                      }
                     : key === "move" || key === "start"
                       ? {
                           custody_type: asset.current_custody_type || "Customer / LE Agency",
-                          location: asset.current_location,
                           agency_id: asset.agency_id || "",
+                          warehouse_id: asset.warehouse_id || "",
+                          address: "",
+                          field_site: false,
                           carrier_name: "",
                           tracking_code: "",
                           status: "deployed",
@@ -413,6 +435,8 @@ export default function AssetTimeline() {
                   method: "PATCH",
                   body: JSON.stringify({
                     vin: form.vin,
+                    license_plate: form.license_plate || null,
+                    license_plate_state: form.license_plate_state || null,
                     make_model: form.make_model,
                     initial_purchase_cost: Number(form.initial_purchase_cost),
                     asset_type: form.asset_type,
@@ -425,6 +449,28 @@ export default function AssetTimeline() {
             <Field label="Asset ID">
               <input required minLength={4} maxLength={32} className={inputClass} value={form.vin} onChange={(e) => setForm({ ...form, vin: e.target.value })} />
             </Field>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <Field label="Plate number (optional)">
+                  <input
+                    maxLength={16}
+                    className={`${inputClass} uppercase`}
+                    placeholder="Leave blank if the unit has no plate"
+                    value={form.license_plate || ""}
+                    onChange={(e) => setForm({ ...form, license_plate: e.target.value.toUpperCase() })}
+                  />
+                </Field>
+              </div>
+              <Field label="State">
+                <input
+                  maxLength={2}
+                  className={`${inputClass} uppercase`}
+                  placeholder="AZ"
+                  value={form.license_plate_state || ""}
+                  onChange={(e) => setForm({ ...form, license_plate_state: e.target.value.toUpperCase() })}
+                />
+              </Field>
+            </div>
             <Field label="Make / model">
               <input required className={inputClass} value={form.make_model} onChange={(e) => setForm({ ...form, make_model: e.target.value })} />
             </Field>
@@ -511,13 +557,20 @@ export default function AssetTimeline() {
             className="space-y-3"
             onSubmit={(e) => {
               e.preventDefault();
+              const site = SITE_FIELD[form.custody_type];
+              const chosen = site
+                ? (site.directory === "agencies" ? agencies : warehouses).find((row) => row.id === form[site.key])
+                : null;
               const payload = {
                 custody_type: form.custody_type,
-                location: form.location,
-                agency_id: form.custody_type === "Customer / LE Agency" && form.agency_id ? form.agency_id : null,
-                address: form.address || null,
-                latitude: form.latitude ? Number(form.latitude) : null,
-                longitude: form.longitude ? Number(form.longitude) : null,
+                // The server renames this from whichever site is linked; it is
+                // sent so a custody move without a directory entry still works.
+                location: chosen
+                  ? `${chosen.name}${chosen.site_name ? ` - ${chosen.site_name}` : ""}`
+                  : asset.current_location,
+                agency_id: form.agency_id || null,
+                warehouse_id: form.warehouse_id || null,
+                address: form.field_site ? form.address || null : null,
                 carrier_name: form.carrier_name || null,
                 tracking_code: form.tracking_code || null,
                 notes: modal === "start" ? "Deployment started from asset profile." : "Custody transfer from asset profile.",
@@ -534,39 +587,35 @@ export default function AssetTimeline() {
             }}
           >
             <Field label="Custody type">
-              <select className={inputClass} value={form.custody_type} onChange={(e) => setForm({ ...form, custody_type: e.target.value, agency_id: "" })}>
+              <select className={inputClass} value={form.custody_type} onChange={(e) => setForm({ ...form, custody_type: e.target.value, agency_id: "", warehouse_id: "" })}>
                 {CUSTODY_TYPES.map((type) => (
                   <option key={type}>{type}</option>
                 ))}
               </select>
             </Field>
-            {form.custody_type === "Customer / LE Agency" ? (
-              <Field label="Customer / Agency">
+            {SITE_FIELD[form.custody_type] ? (
+              <Field label={SITE_FIELD[form.custody_type].label}>
                 <select
+                  required
                   className={inputClass}
-                  value={form.agency_id || ""}
-                  onChange={(e) => {
-                    const agency = agencies.find((row) => row.id === e.target.value);
-                    const location = agency
-                      ? `${agency.name}${agency.site_name ? ` - ${agency.site_name}` : ""}`
-                      : form.location;
+                  value={form[SITE_FIELD[form.custody_type].key] || ""}
+                  onChange={(e) =>
                     setForm({
                       ...form,
-                      agency_id: e.target.value,
-                      location,
-                      address: agency?.address || "",
-                      latitude: agency?.latitude ?? "",
-                      longitude: agency?.longitude ?? "",
-                    });
-                  }}
+                      agency_id: "",
+                      warehouse_id: "",
+                      [SITE_FIELD[form.custody_type].key]: e.target.value,
+                    })
+                  }
                 >
-                  <option value="">Select agency</option>
-                  {agencies.map((agency) => (
-                    <option key={agency.id} value={agency.id}>
-                      {agency.name}{agency.site_name ? ` - ${agency.site_name}` : ""}
+                  <option value="">Select {SITE_FIELD[form.custody_type].label.toLowerCase()}</option>
+                  {(SITE_FIELD[form.custody_type].directory === "agencies" ? agencies : warehouses).map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.name}{row.site_name ? ` - ${row.site_name}` : ""}
                     </option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-slate-500">The location and map pin come from this record.</p>
               </Field>
             ) : null}
             {modal === "start" ? (
@@ -578,17 +627,24 @@ export default function AssetTimeline() {
                 </select>
               </Field>
             ) : null}
-            <Field label="Location / party">
-              <input required className={inputClass} value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} />
-            </Field>
-            <Field label="Address">
+            <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
-                className={inputClass}
-                placeholder="Street, city, state — geocoded for the map"
-                value={form.address || ""}
-                onChange={(e) => setForm({ ...form, address: e.target.value })}
+                type="checkbox"
+                checked={form.field_site || false}
+                onChange={(e) => setForm({ ...form, field_site: e.target.checked })}
               />
-            </Field>
+              Unit sits at a specific field site, not the address on file
+            </label>
+            {form.field_site ? (
+              <Field label="Field site address">
+                <input
+                  className={inputClass}
+                  placeholder="Street, city, state — geocoded for the map"
+                  value={form.address || ""}
+                  onChange={(e) => setForm({ ...form, address: e.target.value })}
+                />
+              </Field>
+            ) : null}
             <Field label="3PL carrier">
               <input disabled={form.custody_type !== "In Transit"} className={inputClass} value={form.carrier_name || ""} onChange={(e) => setForm({ ...form, carrier_name: e.target.value })} />
             </Field>

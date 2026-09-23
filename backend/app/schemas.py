@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator, model_validator
 
 from app.models import (
     AssetOperationalStatus,
@@ -42,6 +42,8 @@ class UserOut(BaseModel):
     role: UserRole
     is_active: bool
     organization_id: UUID
+    # The agency a customer account is scoped to; null for internal roles.
+    agency_id: UUID | None = None
     created_at: datetime
 
 
@@ -50,6 +52,7 @@ class UserCreate(BaseModel):
     password: str = Field(..., min_length=8)
     full_name: str = Field(..., min_length=1)
     role: UserRole = UserRole.READ_ONLY
+    agency_id: UUID | None = None
 
 
 class UserUpdate(BaseModel):
@@ -58,6 +61,7 @@ class UserUpdate(BaseModel):
     full_name: str | None = Field(None, min_length=1)
     role: UserRole | None = None
     is_active: bool | None = None
+    agency_id: UUID | None = None
 
 
 class PasswordChange(BaseModel):
@@ -71,11 +75,24 @@ class AssetAuthorizationGrant(BaseModel):
     can_report_issue: bool = False
 
 
+def _normalize_plate(value: str | None) -> str | None:
+    """Plates are compared by eye and by ALPR read, so store one casing."""
+    cleaned = " ".join((value or "").split()).upper()
+    return cleaned or None
+
+
+def _normalize_plate_state(value: str | None) -> str | None:
+    cleaned = (value or "").strip().upper()
+    return cleaned or None
+
+
 class AssetOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID
     vin: str
+    license_plate: str | None = None
+    license_plate_state: str | None = None
     make_model: str
     initial_purchase_cost: Decimal
     current_location: str
@@ -115,15 +132,32 @@ class AssetTypeKpis(BaseModel):
     downtime_hours_ytd: Decimal
 
 
+class NonAlprInventoryRow(BaseModel):
+    """Inventory-only rollup for asset types outside the ALPR lifecycle."""
+
+    asset_type: AssetType
+    total_assets: int
+    in_service: int
+    out_of_service: int
+    retired: int
+    total_purchase_cost: Decimal
+
+
 class DashboardKpis(BaseModel):
+    # Operational readiness is an ALPR Trailer concept; every count below is
+    # scoped to this type. Other asset types roll up in non_alpr_inventory.
+    asset_type_scope: str
     fleet_size: int
     deployed: int
     available: int
     in_transit: int = 0
     in_maintenance: int
+    out_of_service: int = 0
+    retired: int = 0
     total_purchase_cost: Decimal
     downtime_hours_ytd: Decimal
     by_asset_type: list[AssetTypeKpis]
+    non_alpr_inventory: list[NonAlprInventoryRow] = Field(default_factory=list)
 
 
 class TimelineEvent(BaseModel):
@@ -439,6 +473,8 @@ class AnalyticsHub(BaseModel):
 
 class AssetCreate(BaseModel):
     vin: str = Field(min_length=4, max_length=32)
+    license_plate: str | None = Field(default=None, max_length=16)
+    license_plate_state: str | None = Field(default=None, max_length=2)
     make_model: str = Field(min_length=2, max_length=255)
     initial_purchase_cost: Decimal = Field(gt=0)
     current_location: str = Field(min_length=2, max_length=255)
@@ -448,14 +484,56 @@ class AssetCreate(BaseModel):
     agency_id: UUID | None = None
     notes: str | None = None
 
+    @field_validator("license_plate")
+    @classmethod
+    def clean_plate(cls, value: str | None) -> str | None:
+        return _normalize_plate(value)
+
+    @field_validator("license_plate_state")
+    @classmethod
+    def clean_plate_state(cls, value: str | None) -> str | None:
+        return _normalize_plate_state(value)
+
+
+class AssetImportRow(BaseModel):
+    """Outcome for a single spreadsheet row."""
+
+    row_number: int
+    vin: str | None = None
+    make_model: str | None = None
+    errors: list[str] = Field(default_factory=list)
+    created_asset_id: UUID | None = None
+
+
+class AssetImportResult(BaseModel):
+    filename: str
+    committed: bool
+    total_rows: int
+    valid_rows: int
+    error_rows: int
+    created_count: int = 0
+    rows: list[AssetImportRow] = Field(default_factory=list)
+
 
 class AssetUpdate(BaseModel):
     vin: str | None = Field(default=None, min_length=4, max_length=32)
+    license_plate: str | None = Field(default=None, max_length=16)
+    license_plate_state: str | None = Field(default=None, max_length=2)
     make_model: str | None = Field(default=None, min_length=2, max_length=255)
     initial_purchase_cost: Decimal | None = Field(default=None, gt=0)
     asset_type: AssetType | None = None
     warehouse_id: UUID | None = None
     agency_id: UUID | None = None
+
+    @field_validator("license_plate")
+    @classmethod
+    def clean_plate(cls, value: str | None) -> str | None:
+        return _normalize_plate(value)
+
+    @field_validator("license_plate_state")
+    @classmethod
+    def clean_plate_state(cls, value: str | None) -> str | None:
+        return _normalize_plate_state(value)
 
 
 class OperationalStatusUpdate(BaseModel):
@@ -466,7 +544,14 @@ class OperationalStatusUpdate(BaseModel):
 
 
 class DeploymentStart(BaseModel):
-    location: str = Field(min_length=2, max_length=255)
+    """Start a deployment at a warehouse or agency.
+
+    `location` is derived from whichever site is linked, so callers that pass a
+    warehouse_id or agency_id can leave it out. It stays accepted on its own for
+    field sites that are not in the directory yet.
+    """
+
+    location: str | None = Field(default=None, min_length=2, max_length=255)
     status: DeploymentStatus = DeploymentStatus.DEPLOYED
     custody_type: CustodyType = CustodyType.CUSTOMER_AGENCY
     carrier_name: str | None = None
@@ -477,6 +562,12 @@ class DeploymentStart(BaseModel):
     address: str | None = Field(default=None, max_length=255)
     latitude: Decimal | None = None
     longitude: Decimal | None = None
+
+    @model_validator(mode="after")
+    def needs_somewhere_to_go(self):
+        if not self.warehouse_id and not self.agency_id and not (self.location or "").strip():
+            raise ValueError("Choose a warehouse or agency, or enter a location.")
+        return self
 
 
 class DeploymentEnd(BaseModel):

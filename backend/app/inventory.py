@@ -352,6 +352,57 @@ def update_part(
     return serialize_part(part)
 
 
+@router.delete("/parts/{part_id}")
+def delete_part(
+    part_id: UUID,
+    current_user: User = Depends(require_fleet_admin),
+    db: Session = Depends(get_db),
+) -> dict:
+    """Remove a part, keeping its ledger when one exists.
+
+    A part that was never stocked or used is a data-entry mistake and is deleted
+    outright. Once it has transactions or sits on a work order, that history is
+    the audit trail for stock and repair cost, so the part is retired instead:
+    it leaves the parts list but the ledger stays intact. Mirrors the
+    delete-or-archive behaviour used for warehouses and agencies.
+    """
+    part = get_org_part(db, current_user, part_id)
+
+    on_work_orders = db.scalar(
+        select(func.count(WorkOrderPart.id)).where(WorkOrderPart.part_id == part.id)
+    ) or 0
+    transactions = db.scalar(
+        select(func.count(InventoryTransaction.id)).where(InventoryTransaction.part_id == part.id)
+    ) or 0
+
+    if on_work_orders or transactions:
+        if not part.is_active:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="This part is already retired. Its history cannot be deleted.",
+            )
+        part.is_active = False
+        db.commit()
+        reasons = []
+        if transactions:
+            reasons.append(f"{transactions} stock transaction(s)")
+        if on_work_orders:
+            reasons.append(f"{on_work_orders} work-order line(s)")
+        return {
+            "action": "retired",
+            "id": str(part.id),
+            "sku": part.sku,
+            "detail": (
+                f"{part.sku} has {' and '.join(reasons)} and was retired instead of deleted, "
+                "so the stock and cost history stays intact."
+            ),
+        }
+
+    db.delete(part)
+    db.commit()
+    return {"action": "deleted", "id": str(part_id), "sku": part.sku}
+
+
 @router.get("/parts/{part_id}/transactions")
 def list_part_transactions(
     part_id: UUID,

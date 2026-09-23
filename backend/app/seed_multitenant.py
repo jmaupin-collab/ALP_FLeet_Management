@@ -211,9 +211,17 @@ def create_sample_customer_user(db: Session, org: Organization) -> User:
         print(f"✓ Sample customer user already exists: {existing.email}")
         return existing
     
+    # Customers are scoped to one agency; without it they would see no assets.
+    from app.models import Agency
+
+    agency = db.scalar(
+        select(Agency).where(Agency.organization_id == org.id, Agency.is_archived.is_(False)).order_by(Agency.name)
+    )
+
     user = User(
         id=uuid.uuid4(),
         organization_id=org.id,
+        agency_id=agency.id if agency else None,
         email=f"user@{org.slug}.com",
         hashed_password=hash_password("password123"),
         full_name=f"{org.name} User",
@@ -223,6 +231,8 @@ def create_sample_customer_user(db: Session, org: Organization) -> User:
     db.add(user)
     db.commit()
     db.refresh(user)
+    if agency is None:
+        print(f"! {user.email} has no agency yet and will see no assets until one is assigned.")
     print(f"✓ Created sample customer user: {user.email}")
     return user
 

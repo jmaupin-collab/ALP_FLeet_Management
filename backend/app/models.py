@@ -167,6 +167,12 @@ class User(Base):
     organization_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    # Customer accounts are scoped to exactly one agency and may only see that
+    # agency's assets. Internal roles leave this null and are scoped by org.
+    # SET NULL on delete keeps the failure closed: the customer sees nothing.
+    agency_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     full_name: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -345,6 +351,10 @@ class Asset(Base):
         Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
     )
     vin: Mapped[str] = mapped_column(String(32), unique=True, index=True, nullable=False)
+    # Registration plate. Optional: trailers and yard equipment often have none,
+    # and a plate can be reissued, so the VIN stays the unique identifier.
+    license_plate: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
+    license_plate_state: Mapped[str | None] = mapped_column(String(2), nullable=True)
     make_model: Mapped[str] = mapped_column(String(255), nullable=False)
     initial_purchase_cost: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
     current_location: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -826,6 +836,10 @@ class AssetDocument(Base):
     file_size: Mapped[int] = mapped_column(Integer, nullable=False)
     issue_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
     expiration_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    # How far ahead of expiration_date to start reminding. A registration renewal
+    # wants more lead time than a warranty, so it is per document rather than a
+    # single global constant.
+    reminder_days: Mapped[int] = mapped_column(Integer, default=30, server_default="30", nullable=False)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     uploaded_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True

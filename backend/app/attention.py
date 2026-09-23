@@ -366,6 +366,9 @@ def refresh_attention(db: Session, organization_id: UUID, *, force: bool = True)
         if not doc.expiration_date:
             continue
         days = (doc.expiration_date - today).days
+        # Each document carries its own lead time; registration renewals need
+        # more warning than a warranty.
+        lead_days = doc.reminder_days if doc.reminder_days is not None else DOC_SOON_DAYS
         label = doc.document_type.value.replace("_", " ")
         if days < 0:
             _upsert(
@@ -382,7 +385,7 @@ def refresh_attention(db: Session, organization_id: UUID, *, force: bool = True)
                 document_id=doc.id,
                 link_path=f"/assets/{doc.asset_id}",
             )
-        elif days <= DOC_SOON_DAYS:
+        elif days <= lead_days:
             kind = {
                 DocumentType.REGISTRATION: "doc_expiring_registration",
                 DocumentType.INSURANCE: "doc_expiring_insurance",

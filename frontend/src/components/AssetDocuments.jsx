@@ -18,9 +18,18 @@ const emptyForm = {
   title: "",
   issue_date: "",
   expiration_date: "",
+  reminder_days: "30",
   notes: "",
   file: null,
 };
+
+const REMINDER_CHOICES = [
+  ["0", "On the expiration date"],
+  ["14", "2 weeks before"],
+  ["30", "30 days before"],
+  ["60", "60 days before"],
+  ["90", "90 days before"],
+];
 
 export default function AssetDocuments({ assetId }) {
   const [docs, setDocs] = useState([]);
@@ -66,6 +75,7 @@ export default function AssetDocuments({ assetId }) {
       body.append("title", form.title);
       if (form.issue_date) body.append("issue_date", form.issue_date);
       if (form.expiration_date) body.append("expiration_date", form.expiration_date);
+      body.append("reminder_days", form.reminder_days || "30");
       if (form.notes) body.append("notes", form.notes);
       body.append("file", form.file);
       await api(`/assets/${assetId}/documents`, { method: "POST", body });
@@ -136,19 +146,22 @@ export default function AssetDocuments({ assetId }) {
         <p className="mt-3 text-sm text-slate-500">No documents uploaded.</p>
       ) : (
         <ul className="mt-3 space-y-2">
-          {docs.map((doc) => (
+          {DOCUMENT_TYPES.filter(([value]) => docs.some((d) => d.document_type === value)).flatMap(([value, label]) => [
+            <li key={`group-${value}`} className="pt-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+              {label}
+            </li>,
+            ...docs.filter((d) => d.document_type === value).map((doc) => (
             <li key={doc.id} className={`rounded-lg border p-3 ${tone(doc.expiration_state)}`}>
               <div className="flex flex-wrap items-start justify-between gap-2">
                 <div>
                   <p className="text-sm font-semibold text-slate-900">{doc.title}</p>
-                  <p className="text-xs text-slate-600">
-                    {doc.document_type_label} · {doc.original_filename}
-                  </p>
+                  <p className="text-xs text-slate-600">{doc.original_filename}</p>
                   <p className="mt-1 text-xs text-slate-500">
                     {doc.issue_date ? `Issued ${doc.issue_date}` : "No issue date"}
                     {doc.expiration_date ? ` · Expires ${doc.expiration_date}` : ""}
                     {doc.expiration_state === "expired" ? " · Expired" : ""}
                     {doc.expiration_state === "soon" ? ` · ${doc.days_to_expire} days left` : ""}
+                    {doc.expiration_date ? ` · Reminder ${doc.reminder_days}d ahead` : ""}
                   </p>
                   {doc.notes ? <p className="mt-1 text-xs text-slate-600">{doc.notes}</p> : null}
                 </div>
@@ -162,7 +175,8 @@ export default function AssetDocuments({ assetId }) {
                 </div>
               </div>
             </li>
-          ))}
+            )),
+          ])}
         </ul>
       )}
 
@@ -189,6 +203,20 @@ export default function AssetDocuments({ assetId }) {
                 <input type="date" className={inputClass} value={form.expiration_date} onChange={(e) => setForm({ ...form, expiration_date: e.target.value })} />
               </Field>
             </div>
+            {form.expiration_date ? (
+              <Field label="Remind me">
+                <select className={inputClass} value={form.reminder_days} onChange={(e) => setForm({ ...form, reminder_days: e.target.value })}>
+                  {REMINDER_CHOICES.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs text-slate-500">
+                  Shows up in the Attention Center once the reminder window opens.
+                </p>
+              </Field>
+            ) : null}
             <Field label="Notes">
               <textarea className={inputClass} value={form.notes} onChange={(e) => setForm({ ...form, notes: e.target.value })} />
             </Field>

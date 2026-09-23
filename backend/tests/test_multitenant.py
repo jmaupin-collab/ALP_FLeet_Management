@@ -206,7 +206,7 @@ def test_customer_user_restricted_access():
     db = next(get_db())
     
     try:
-        from app.models import AssetAuthorization
+        from app.models import Agency, AssetAuthorization
         
         org = Organization(
             id=uuid.uuid4(),
@@ -217,10 +217,16 @@ def test_customer_user_restricted_access():
         )
         db.add(org)
         db.commit()
-        
+
+        agency = Agency(id=uuid.uuid4(), organization_id=org.id, name="Customer Agency")
+        db.add(agency)
+        db.commit()
+
         customer = User(
             id=uuid.uuid4(),
             organization_id=org.id,
+            # Customers are scoped to one agency on top of the per-asset grant.
+            agency_id=agency.id,
             email="customer@customer.com",
             hashed_password=hash_password("password"),
             full_name="Customer User",
@@ -240,6 +246,7 @@ def test_customer_user_restricted_access():
             initial_purchase_cost=30000,
             current_location="Location A",
             current_custody_type="Warehouse Depot",
+            agency_id=agency.id,
         )
         asset_not_authorized = Asset(
             id=uuid.uuid4(),
@@ -250,6 +257,7 @@ def test_customer_user_restricted_access():
             initial_purchase_cost=30000,
             current_location="Location B",
             current_custody_type="Warehouse Depot",
+            agency_id=agency.id,
         )
         db.add_all([asset_authorized, asset_not_authorized])
         db.commit()

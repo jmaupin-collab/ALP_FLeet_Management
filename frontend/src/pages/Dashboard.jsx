@@ -12,9 +12,13 @@ const emptyKpis = {
   available: 0,
   in_transit: 0,
   in_maintenance: 0,
+  out_of_service: 0,
+  retired: 0,
   total_purchase_cost: 0,
   downtime_hours_ytd: 0,
+  asset_type_scope: "ALPR Trailer",
   by_asset_type: [],
+  non_alpr_inventory: [],
 };
 
 export default function Dashboard() {
@@ -58,15 +62,22 @@ export default function Dashboard() {
     { label: "Available", value: kpis.available },
     { label: "In transit", value: kpis.in_transit },
     { label: "In maintenance", value: kpis.in_maintenance },
+    { label: "Out of service", value: kpis.out_of_service },
+    { label: "Retired", value: kpis.retired },
     { label: "Asset book value", value: money(kpis.total_purchase_cost) },
     { label: "Recorded WO downtime", value: hours(kpis.downtime_hours_ytd) },
   ];
+
+  const scope = kpis.asset_type_scope || "ALPR Trailer";
+  const nonAlpr = kpis.non_alpr_inventory || [];
 
   return (
     <div className="space-y-8">
       <div>
         <h2 className="text-2xl font-semibold text-slate-900">Dashboard</h2>
-        <p className="mt-1 text-sm text-slate-600">KPI rollups plus live failure mix from the analytics engine.</p>
+        <p className="mt-1 text-sm text-slate-600">
+          Readiness counts cover {scope}s only. Other asset types are listed under Other fleet inventory below.
+        </p>
       </div>
       {loading ? <p className="text-sm text-slate-600">Loading dashboard…</p> : null}
       <Notice error={error} />
@@ -108,7 +119,7 @@ export default function Dashboard() {
         </div>
       ) : null}
       <div>
-        <h3 className="mb-3 text-sm font-semibold text-slate-800">Metrics by asset type</h3>
+        <h3 className="mb-3 text-sm font-semibold text-slate-800">{scope} metrics by asset type</h3>
         <DataTable
           columns={[
             { key: "asset_type", header: "Asset type", render: (r) => <Badge value={r.asset_type} tone="type" /> },
@@ -121,6 +132,27 @@ export default function Dashboard() {
           ]}
           rows={kpis.by_asset_type.map((row) => ({ ...row, id: row.asset_type }))}
           empty="No KPI rows yet."
+        />
+      </div>
+      <div>
+        <div className="mb-3">
+          <h3 className="text-sm font-semibold text-slate-800">Other fleet inventory</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            Semi Trucks and Fleet Vehicles are tracked as inventory and are deliberately left out of the {scope}
+            {" "}readiness counts above.
+          </p>
+        </div>
+        <DataTable
+          columns={[
+            { key: "asset_type", header: "Asset type", render: (r) => <Badge value={r.asset_type} tone="type" /> },
+            { key: "total_assets", header: "Units" },
+            { key: "in_service", header: "In service" },
+            { key: "out_of_service", header: "Out of service" },
+            { key: "retired", header: "Retired" },
+            { key: "total_purchase_cost", header: "Purchase cost", render: (r) => money(r.total_purchase_cost) },
+          ]}
+          rows={nonAlpr.map((row) => ({ ...row, id: row.asset_type }))}
+          empty="No non-ALPR assets on record."
         />
       </div>
       <div>
@@ -139,11 +171,11 @@ export default function Dashboard() {
         <DataTable
           columns={[
             {
-              key: "make_model",
-              header: "Asset",
+              key: "vin",
+              header: "Asset ID",
               render: (r) => (
-                <Link className="text-teal-800 hover:underline" to={`/assets/${r.asset_id}`}>
-                  {r.make_model}
+                <Link className="font-mono text-xs text-teal-800 hover:underline" to={`/assets/${r.asset_id}`}>
+                  {r.vin}
                 </Link>
               ),
             },

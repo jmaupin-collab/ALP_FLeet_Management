@@ -472,7 +472,7 @@ export default function Analytics() {
         <h3 className="mb-3 text-sm font-semibold text-slate-800">Asset utilization (lifecycle history)</h3>
         <DataTable
           columns={[
-            { key: "make_model", header: "Asset" },
+            { key: "vin", header: "Asset ID", render: (r) => <span className="font-mono text-xs">{r.vin}</span> },
             { key: "utilization_30d", header: "30-day", render: (r) => `${Number(r.utilization_30d || 0).toFixed(1)}%` },
             { key: "utilization_90d", header: "90-day", render: (r) => `${Number(r.utilization_90d || 0).toFixed(1)}%` },
             { key: "utilization_365d", header: "365-day", render: (r) => `${Number(r.utilization_365d || 0).toFixed(1)}%` },

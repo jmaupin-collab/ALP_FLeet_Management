@@ -53,6 +53,27 @@ cd backend
 python -m scripts.create_admin   # prompts for email and password
 ```
 
+## Bulk asset import
+
+Assets → **Bulk Upload** accepts a `.xlsx` or `.csv` sheet. Download the template first: it
+carries the expected headers plus the warehouse and agency names belonging to the caller's
+organization.
+
+The upload is checked before anything is written. A dry run reports problems per spreadsheet
+row, and the commit only runs when every row is clean, in a single transaction — one bad row
+never leaves a half-imported file behind. Rows become `AssetCreate` payloads and go through
+`ops.create_asset()`, so the import cannot accept an asset the single-asset form would reject.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /assets/import/template?format=xlsx\|csv` | Download the import sheet |
+| `GET /assets/import/columns` | Column reference used by the upload screen |
+| `POST /assets/import?commit=false` | Validate and report per-row errors |
+| `POST /assets/import?commit=true` | Write the rows, all or nothing |
+
+Limits are 1000 rows and 5 MB per upload. Warehouse and agency cells are matched by name
+within the caller's organization only, so a sheet cannot reference another tenant's sites.
+
 ## Tests
 
 ```bash
@@ -71,7 +92,14 @@ Roles resolve through `app/rbac.py`:
 | `fleet_manager` | Assets, deployments, maintenance, exports |
 | `technician` | Maintenance and inspections |
 | `read_only` | View and analytics |
-| `customer` | Only assets explicitly granted via `AssetAuthorization` |
+| `customer` | One agency only, and within it only assets explicitly granted via `AssetAuthorization` |
+
+Customer accounts carry a `users.agency_id` and see an asset only when it is in
+their organization, its current `agency_id` matches theirs, and a grant exists.
+Because the agency is read live from `Asset.agency_id`, transfers change
+visibility immediately and returning an asset to a warehouse removes it. A
+customer with no agency assigned sees nothing rather than everything. See
+[docs/customer-agency-scoping.md](docs/customer-agency-scoping.md).
 
 A user can only assign roles at or below their own rank, so an org admin cannot create a system admin. Legacy role values (`admin`, `dispatcher`, `program_manager`, `viewer`) are normalized to the list above at startup and resolved through `canonical_role()` everywhere else.
 

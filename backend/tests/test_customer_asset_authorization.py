@@ -84,6 +84,10 @@ def customer_org(db_session):
     db_session.add_all([warehouse, agency])
     db_session.flush()
 
+    # Customer accounts are scoped to one agency; both assets below sit in it,
+    # so this suite still isolates on the per-asset grant alone.
+    customer.agency_id = agency.id
+
     asset_a = Asset(
         organization_id=org.id,
         vin="CUSTA0000001",

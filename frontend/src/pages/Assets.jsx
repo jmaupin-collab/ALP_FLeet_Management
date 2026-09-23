@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import BulkAssetUpload from "../components/BulkAssetUpload.jsx";
 import { DataTable } from "../components/DataTable";
 import { Field, Modal, Notice, inputClass } from "../components/Modal.jsx";
 import { api } from "../lib/api.js";
@@ -9,12 +10,23 @@ import { ADMINS, hasRole } from "../lib/roles.js";
 
 const emptyForm = {
   vin: "",
+  license_plate: "",
+  license_plate_state: "",
   make_model: "",
   initial_purchase_cost: "",
   current_location: "",
   asset_type: "ALPR Trailer",
   current_custody_type: "Warehouse Depot",
   warehouse_id: "",
+  agency_id: "",
+};
+
+// A new asset's location comes from the site it sits at, so the picker follows
+// the custody type instead of asking for a typed location.
+const SITE_FIELD = {
+  "Warehouse Depot": { key: "warehouse_id", label: "Warehouse", directory: "warehouses" },
+  "In Transit": { key: "warehouse_id", label: "Destination warehouse", directory: "warehouses" },
+  "Customer / LE Agency": { key: "agency_id", label: "Agency", directory: "agencies" },
 };
 
 export default function Assets() {
@@ -23,6 +35,7 @@ export default function Assets() {
   const [includeArchived, setIncludeArchived] = useState(false);
   const [assets, setAssets] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
+  const [agencies, setAgencies] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
@@ -31,6 +44,7 @@ export default function Assets() {
   const [busy, setBusy] = useState(false);
   const [confirm, setConfirm] = useState(null);
   const [currentUser, setCurrentUser] = useState(null);
+  const [bulkOpen, setBulkOpen] = useState(false);
 
   async function load() {
     setLoading(true);
@@ -52,8 +66,9 @@ export default function Assets() {
 
   useEffect(() => {
     load();
-    // Load warehouses for the dropdown
+    // Load the sites a new asset can start at
     api("/warehouses").then(setWarehouses).catch(() => setWarehouses([]));
+    api("/agencies").then(setAgencies).catch(() => setAgencies([]));
     // Load current user to check role
     api("/auth/me").then(setCurrentUser).catch(() => setCurrentUser(null));
   }, [assetType, includeArchived]);
@@ -63,10 +78,24 @@ export default function Assets() {
   // Check if current user is an admin
   const isAdmin = hasRole(currentUser, ADMINS);
 
+  const site = SITE_FIELD[form.current_custody_type] || SITE_FIELD["Warehouse Depot"];
+  const siteOptions = site.directory === "agencies" ? agencies : warehouses;
+
+  function selectSite(event) {
+    const id = event.target.value;
+    const name = event.target.selectedOptions[0]?.text || "";
+    // Only one link applies at a time, so clear both before setting the live one.
+    setForm({ ...form, warehouse_id: "", agency_id: "", [site.key]: id, current_location: id ? name : "" });
+  }
+
   async function saveAsset(event) {
     event.preventDefault();
-    if (!form.vin || !form.make_model || !form.current_location || !form.initial_purchase_cost) {
-      setError("Asset ID, make/model, location, and purchase cost are required.");
+    if (!form.vin || !form.make_model || !form.initial_purchase_cost) {
+      setError("Asset ID, make/model, and purchase cost are required.");
+      return;
+    }
+    if (modal === "create" && !form[site.key]) {
+      setError(`Select a ${site.label.toLowerCase()} so the asset has a location.`);
       return;
     }
     setBusy(true);
@@ -76,8 +105,17 @@ export default function Assets() {
         await api("/assets", {
           method: "POST",
           body: JSON.stringify({
-            ...form,
+            vin: form.vin,
+            license_plate: form.license_plate || null,
+            license_plate_state: form.license_plate_state || null,
+            make_model: form.make_model,
+            asset_type: form.asset_type,
             initial_purchase_cost: Number(form.initial_purchase_cost),
+            current_location: form.current_location,
+            current_custody_type: form.current_custody_type,
+            // Empty strings are not valid UUIDs; send null for the unused link.
+            warehouse_id: form.warehouse_id || null,
+            agency_id: form.agency_id || null,
           }),
         });
         setSuccess("Asset created.");
@@ -86,6 +124,8 @@ export default function Assets() {
           method: "PATCH",
           body: JSON.stringify({
             vin: form.vin,
+            license_plate: form.license_plate || null,
+            license_plate_state: form.license_plate_state || null,
             make_model: form.make_model,
             initial_purchase_cost: Number(form.initial_purchase_cost),
             asset_type: form.asset_type,
@@ -133,23 +173,32 @@ export default function Assets() {
           <h2 className="text-2xl font-semibold text-slate-900">Assets</h2>
           <p className="mt-1 text-sm text-slate-600">Search the mixed fleet. Archive operational units; delete only test or accidental records.</p>
         </div>
-        <button
-          type="button"
-          onClick={() => {
-            setForm(emptyForm);
-            setModal("create");
-          }}
-          className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-600"
-        >
-          Add New Asset
-        </button>
+        <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setBulkOpen(true)}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+          >
+            Bulk Upload
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setForm(emptyForm);
+              setModal("create");
+            }}
+            className="rounded-lg bg-teal-700 px-4 py-2 text-sm font-semibold text-white hover:bg-teal-600"
+          >
+            Add New Asset
+          </button>
+        </div>
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <input
           value={q}
           onChange={(e) => setQ(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && load()}
-          placeholder="Search Asset ID, model, custody"
+          placeholder="Search Asset ID, plate, model, custody"
           className="w-64 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm outline-none ring-teal-500 focus:ring-2"
         />
         <select
@@ -188,6 +237,19 @@ export default function Assets() {
             ),
           },
           { key: "vin", header: "Asset ID", render: (r) => <span className="font-mono text-xs">{r.vin}</span> },
+          {
+            key: "license_plate",
+            header: "Plate",
+            render: (r) =>
+              r.license_plate ? (
+                <span className="font-mono text-xs">
+                  {r.license_plate}
+                  {r.license_plate_state ? <span className="text-slate-500"> · {r.license_plate_state}</span> : null}
+                </span>
+              ) : (
+                <span className="text-slate-400">—</span>
+              ),
+          },
           { key: "asset_type", header: "Type", render: (r) => <Badge value={r.asset_type} tone="type" /> },
           {
             key: "custody",
@@ -226,6 +288,8 @@ export default function Assets() {
                     setForm({
                       id: r.id,
                       vin: r.vin,
+                      license_plate: r.license_plate || "",
+                      license_plate_state: r.license_plate_state || "",
                       make_model: r.make_model,
                       initial_purchase_cost: r.initial_purchase_cost,
                       current_location: r.current_location,
@@ -259,12 +323,44 @@ export default function Assets() {
         empty="No assets match those filters."
       />
 
+      {bulkOpen ? (
+        <BulkAssetUpload
+          onClose={() => setBulkOpen(false)}
+          onImported={(result) => {
+            setSuccess(`Imported ${result.created_count} ${result.created_count === 1 ? "asset" : "assets"}.`);
+            load();
+          }}
+        />
+      ) : null}
+
       {modal ? (
         <Modal title={modal === "create" ? "Add New Asset" : "Edit Asset"} onClose={() => setModal(null)}>
           <form onSubmit={saveAsset} className="space-y-3">
             <Field label="Asset ID">
               <input required minLength={4} maxLength={32} className={inputClass} value={form.vin} onChange={(e) => setForm({ ...form, vin: e.target.value })} />
             </Field>
+            <div className="grid grid-cols-3 gap-3">
+              <div className="col-span-2">
+                <Field label="Plate number (optional)">
+                  <input
+                    maxLength={16}
+                    className={`${inputClass} uppercase`}
+                    placeholder="Leave blank if the unit has no plate"
+                    value={form.license_plate}
+                    onChange={(e) => setForm({ ...form, license_plate: e.target.value.toUpperCase() })}
+                  />
+                </Field>
+              </div>
+              <Field label="State">
+                <input
+                  maxLength={2}
+                  className={`${inputClass} uppercase`}
+                  placeholder="AZ"
+                  value={form.license_plate_state}
+                  onChange={(e) => setForm({ ...form, license_plate_state: e.target.value.toUpperCase() })}
+                />
+              </Field>
+            </div>
             <Field label="Make / model">
               <input required className={inputClass} value={form.make_model} onChange={(e) => setForm({ ...form, make_model: e.target.value })} />
             </Field>
@@ -288,31 +384,34 @@ export default function Assets() {
             </Field>
             {modal === "create" ? (
               <>
-                <Field label="Initial location">
-                  <input required className={inputClass} value={form.current_location} onChange={(e) => setForm({ ...form, current_location: e.target.value })} />
-                </Field>
                 <Field label="Custody type">
-                  <select className={inputClass} value={form.current_custody_type} onChange={(e) => setForm({ ...form, current_custody_type: e.target.value })}>
+                  <select
+                    className={inputClass}
+                    value={form.current_custody_type}
+                    onChange={(e) =>
+                      setForm({ ...form, current_custody_type: e.target.value, warehouse_id: "", agency_id: "", current_location: "" })
+                    }
+                  >
                     {CUSTODY_TYPES.map((type) => (
                       <option key={type}>{type}</option>
                     ))}
                   </select>
                 </Field>
-                {form.current_custody_type === "Warehouse Depot" && (
-                  <Field label="Select warehouse">
-                    <select 
-                      className={inputClass} 
-                      value={form.warehouse_id} 
-                      onChange={(e) => setForm({ ...form, warehouse_id: e.target.value, current_location: e.target.selectedOptions[0]?.text || form.current_location })}
-                      required
-                    >
-                      <option value="">-- Select a warehouse --</option>
-                      {warehouses.map((wh) => (
-                        <option key={wh.id} value={wh.id}>{wh.name}</option>
-                      ))}
-                    </select>
-                  </Field>
-                )}
+                <Field label={site.label}>
+                  <select required className={inputClass} value={form[site.key]} onChange={selectSite}>
+                    <option value="">{`-- Select a ${site.label.toLowerCase()} --`}</option>
+                    {siteOptions.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.name}
+                      </option>
+                    ))}
+                  </select>
+                  {siteOptions.length === 0 ? (
+                    <p className="mt-1 text-xs text-slate-600">
+                      No {site.directory} yet. Add one under {site.directory === "agencies" ? "Agencies" : "Warehouses"} first.
+                    </p>
+                  ) : null}
+                </Field>
               </>
             ) : null}
             <button disabled={busy} type="submit" className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">

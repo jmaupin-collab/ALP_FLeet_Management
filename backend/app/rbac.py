@@ -139,15 +139,34 @@ def require_org_access(org_id: UUID, user: User) -> None:
         )
 
 
+def customer_agency_id(user: User) -> UUID | None:
+    """The single agency a customer account is scoped to, if one is assigned."""
+    return user.agency_id if is_customer(user) else None
+
+
 def get_user_asset_ids(db: Session, user: User) -> set[UUID] | None:
-    """Asset IDs a user may see, or None when they may see their whole organization."""
+    """Asset IDs a user may see, or None when they may see their whole organization.
+
+    For a customer this is the intersection of three scopes: their organization,
+    the one agency their account belongs to, and the assets explicitly granted
+    to them. Joining Asset means the agency is read live, so an asset that moves
+    to another agency drops out immediately even though the grant row survives.
+
+    A customer with no agency assigned resolves to the empty set. They must never
+    fall back to "all customer assets".
+    """
     if not is_customer(user):
         return None
+    if user.agency_id is None:
+        return set()
     return set(
         db.scalars(
             select(AssetAuthorization.asset_id)
+            .join(Asset, Asset.id == AssetAuthorization.asset_id)
             .where(AssetAuthorization.user_id == user.id)
             .where(AssetAuthorization.can_view.is_(True))
+            .where(Asset.organization_id == user.organization_id)
+            .where(Asset.agency_id == user.agency_id)
         ).all()
     )
 
@@ -177,7 +196,14 @@ def filter_assets_by_access(query, user: User, db: Session, *, organization_id: 
         authorized_asset_ids = get_user_asset_ids(db, user)
         if not authorized_asset_ids:
             return query.where(false())
-        return query.where(Asset.id.in_(authorized_asset_ids))
+        # The org and agency predicates are redundant with the id set above, and
+        # deliberately so: the scope stays enforced in the SQL even if a caller
+        # ever supplies asset ids from somewhere else.
+        return (
+            query.where(Asset.organization_id == user.organization_id)
+            .where(Asset.agency_id == user.agency_id)
+            .where(Asset.id.in_(authorized_asset_ids))
+        )
 
     scope = organization_id if organization_id is not None else user.organization_id
     return query.where(Asset.organization_id == scope)
@@ -197,6 +223,14 @@ def require_asset_access(db: Session, user: User, asset_id: UUID) -> Asset:
         return asset
 
     if is_customer(user):
+        # Same three scopes as get_user_asset_ids, and the same 404 for each, so
+        # a customer cannot tell an out-of-agency asset from a nonexistent one.
+        if (
+            user.agency_id is None
+            or asset.organization_id != user.organization_id
+            or asset.agency_id != user.agency_id
+        ):
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Asset not found")
         auth = db.scalar(
             select(AssetAuthorization)
             .where(AssetAuthorization.user_id == user.id)

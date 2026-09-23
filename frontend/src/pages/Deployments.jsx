@@ -6,6 +6,14 @@ import { api } from "../lib/api.js";
 import { ASSET_TYPES, DEPLOYMENT_STATUSES, OPERATIONAL_STATUSES } from "../lib/constants.js";
 import { Badge } from "../lib/format.jsx";
 
+// The deployment location is the site you pick, so each custody type points at
+// the directory it belongs to instead of asking for the name a second time.
+const SITE_FIELD = {
+  "Customer / LE Agency": { key: "agency_id", label: "Customer / Agency", directory: "agencies" },
+  "In Transit": { key: "warehouse_id", label: "Destination warehouse", directory: "warehouses" },
+  "Warehouse Depot": { key: "warehouse_id", label: "Warehouse", directory: "warehouses" },
+};
+
 export default function Deployments() {
   const [rows, setRows] = useState([]);
   const [filteredRows, setFilteredRows] = useState([]);
@@ -144,13 +152,14 @@ export default function Deployments() {
           onClick={() => {
             setForm({
               asset_id: assets.find((a) => String(a.operational_status || "").toLowerCase() === "available")?.id || assets[0]?.id || "",
-              location: "",
               notes: "",
               address: "",
               latitude: "",
               longitude: "",
               custody_type: "Customer / LE Agency",
               agency_id: "",
+              warehouse_id: "",
+              field_site: false,
               carrier_name: "",
               tracking_code: "",
             });
@@ -415,18 +424,24 @@ export default function Deployments() {
               e.preventDefault();
               setBusy(true);
               try {
+                const site = SITE_FIELD[form.custody_type];
+                if (site && !form[site.key]) {
+                  throw new Error(`Select a ${site.label.toLowerCase()} for this deployment.`);
+                }
                 await api(`/assets/${form.asset_id}/deployments`, {
                   method: "POST",
                   body: JSON.stringify({
-                    location: form.location,
                     custody_type: form.custody_type,
                     notes: form.notes,
                     carrier_name: form.carrier_name || null,
                     tracking_code: form.tracking_code || null,
-                    agency_id: form.custody_type === "Customer / LE Agency" && form.agency_id ? form.agency_id : null,
-                    address: form.address || null,
-                    latitude: form.latitude ? parseFloat(form.latitude) : null,
-                    longitude: form.longitude ? parseFloat(form.longitude) : null,
+                    agency_id: form.agency_id || null,
+                    warehouse_id: form.warehouse_id || null,
+                    // Only sent when the unit is going somewhere other than the
+                    // site's own address; otherwise the server uses the site pin.
+                    address: form.field_site ? form.address || null : null,
+                    latitude: form.field_site && form.latitude ? parseFloat(form.latitude) : null,
+                    longitude: form.field_site && form.longitude ? parseFloat(form.longitude) : null,
                   }),
                 });
                 setSuccess("Deployment started.");
@@ -453,55 +468,45 @@ export default function Deployments() {
                 ))}
               </select>
             </Field>
-            <Field label="Location">
-              <input
-                required
-                className={inputClass}
-                value={form.location}
-                onChange={(e) => setForm({ ...form, location: e.target.value })}
-              />
-            </Field>
             <Field label="Custody Type">
               <select
                 required
                 className={inputClass}
                 value={form.custody_type}
-                onChange={(e) => setForm({ ...form, custody_type: e.target.value, agency_id: "" })}
+                onChange={(e) => setForm({ ...form, custody_type: e.target.value, agency_id: "", warehouse_id: "" })}
               >
                 <option value="Customer / LE Agency">Customer / LE Agency</option>
                 <option value="In Transit">In Transit</option>
                 <option value="Warehouse Depot">Warehouse Depot</option>
               </select>
             </Field>
-            {form.custody_type === "Customer / LE Agency" && (
-              <Field label="Customer / Agency">
+            {SITE_FIELD[form.custody_type] ? (
+              <Field label={SITE_FIELD[form.custody_type].label}>
                 <select
+                  required
                   className={inputClass}
-                  value={form.agency_id || ""}
-                  onChange={(e) => {
-                    const agency = agencies.find((row) => row.id === e.target.value);
-                    const location = agency
-                      ? `${agency.name}${agency.site_name ? ` - ${agency.site_name}` : ""}`
-                      : form.location;
+                  value={form[SITE_FIELD[form.custody_type].key] || ""}
+                  onChange={(e) =>
                     setForm({
                       ...form,
-                      agency_id: e.target.value,
-                      location,
-                      address: agency?.address || "",
-                      latitude: agency?.latitude ?? "",
-                      longitude: agency?.longitude ?? "",
-                    });
-                  }}
+                      agency_id: "",
+                      warehouse_id: "",
+                      [SITE_FIELD[form.custody_type].key]: e.target.value,
+                    })
+                  }
                 >
-                  <option value="">Select agency</option>
-                  {agencies.map((agency) => (
-                    <option key={agency.id} value={agency.id}>
-                      {agency.name}{agency.site_name ? ` - ${agency.site_name}` : ""}
+                  <option value="">Select {SITE_FIELD[form.custody_type].label.toLowerCase()}</option>
+                  {(SITE_FIELD[form.custody_type].directory === "agencies" ? agencies : warehouses).map((row) => (
+                    <option key={row.id} value={row.id}>
+                      {row.name}{row.site_name ? ` - ${row.site_name}` : ""}
                     </option>
                   ))}
                 </select>
+                <p className="mt-1 text-xs text-slate-500">
+                  The deployment location and map pin come from this record.
+                </p>
               </Field>
-            )}
+            ) : null}
             {form.custody_type === "In Transit" && (
               <>
                 <Field label="3PL Carrier">
@@ -524,36 +529,48 @@ export default function Deployments() {
                 </Field>
               </>
             )}
-            <Field label="Address (optional)">
+            <label className="flex items-center gap-2 text-sm text-slate-700">
               <input
-                className={inputClass}
-                placeholder="123 Main St, Phoenix, AZ 85001"
-                value={form.address || ""}
-                onChange={(e) => setForm({ ...form, address: e.target.value })}
+                type="checkbox"
+                checked={form.field_site || false}
+                onChange={(e) => setForm({ ...form, field_site: e.target.checked })}
               />
-            </Field>
-            <div className="grid grid-cols-2 gap-3">
-              <Field label="Latitude (optional)">
-                <input
-                  type="number"
-                  step="any"
-                  className={inputClass}
-                  placeholder="33.4484"
-                  value={form.latitude || ""}
-                  onChange={(e) => setForm({ ...form, latitude: e.target.value })}
-                />
-              </Field>
-              <Field label="Longitude (optional)">
-                <input
-                  type="number"
-                  step="any"
-                  className={inputClass}
-                  placeholder="-112.0740"
-                  value={form.longitude || ""}
-                  onChange={(e) => setForm({ ...form, longitude: e.target.value })}
-                />
-              </Field>
-            </div>
+              Unit sits at a specific field site, not the address on file
+            </label>
+            {form.field_site ? (
+              <>
+                <Field label="Field site address">
+                  <input
+                    className={inputClass}
+                    placeholder="123 Main St, Phoenix, AZ 85001"
+                    value={form.address || ""}
+                    onChange={(e) => setForm({ ...form, address: e.target.value })}
+                  />
+                </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="Latitude (optional)">
+                    <input
+                      type="number"
+                      step="any"
+                      className={inputClass}
+                      placeholder="33.4484"
+                      value={form.latitude || ""}
+                      onChange={(e) => setForm({ ...form, latitude: e.target.value })}
+                    />
+                  </Field>
+                  <Field label="Longitude (optional)">
+                    <input
+                      type="number"
+                      step="any"
+                      className={inputClass}
+                      placeholder="-112.0740"
+                      value={form.longitude || ""}
+                      onChange={(e) => setForm({ ...form, longitude: e.target.value })}
+                    />
+                  </Field>
+                </div>
+              </>
+            ) : null}
             <Field label="Notes">
               <textarea
                 className={inputClass}
@@ -731,19 +748,24 @@ function EndDeploymentModal({ form, setForm, warehouses, agencies, busy, onClose
               <select
                 required
                 className={inputClass}
-                value={form.next_agency_id}
+                value={form.next_agency_id || ""}
                 onChange={(e) => setForm({ ...form, next_agency_id: e.target.value })}
               >
+                <option value="">Select agency</option>
                 {agencies.map((agency) => (
                   <option key={agency.id} value={agency.id}>
-                    {agency.name}
+                    {agency.name}{agency.site_name ? ` - ${agency.site_name}` : ""}
                   </option>
                 ))}
               </select>
+              <p className="mt-1 text-xs text-slate-500">
+                The new location and map pin come from this agency.
+              </p>
             </Field>
-            <Field label="Next Deployment Location">
+            <Field label="Field site address (optional)">
               <input
                 className={inputClass}
+                placeholder="Leave blank to use the agency's own address"
                 value={form.next_deployment_location || ""}
                 onChange={(e) => setForm({ ...form, next_deployment_location: e.target.value })}
               />

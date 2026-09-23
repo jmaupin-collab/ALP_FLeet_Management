@@ -1,6 +1,7 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { api, clearToken } from "../lib/api.js";
+import { clearOrder, loadOrder, moveItem, orderTabs, saveOrder } from "../lib/navOrder.js";
 import { useMe, clearMeCache } from "../lib/useMe.js";
 import { ADMINS, ALL_INTERNAL, EVERYONE, MANAGERS, OPERATORS, VIEWERS, hasRole, homePathFor } from "../lib/roles.js";
 
@@ -16,6 +17,7 @@ const tabs = [
   { to: "/parts", label: "Parts", roles: OPERATORS },
   { to: "/preventive-maintenance", label: "Preventive Maintenance", roles: ALL_INTERNAL },
   { to: "/inspections", label: "Inspections", roles: EVERYONE },
+  { to: "/documents", label: "Documents", roles: MANAGERS },
   { to: "/analytics", label: "Analytics", roles: VIEWERS },
   { to: "/warehouses", label: "Warehouses", roles: VIEWERS },
   { to: "/agencies", label: "Agencies", roles: VIEWERS },
@@ -32,6 +34,29 @@ export default function Layout() {
   const [passwordError, setPasswordError] = useState("");
   const [passwordSuccess, setPasswordSuccess] = useState("");
   const [busy, setBusy] = useState(false);
+  const [navOrder, setNavOrder] = useState(null);
+  const [reordering, setReordering] = useState(false);
+  const [dragFrom, setDragFrom] = useState(null);
+
+  useEffect(() => {
+    if (me) setNavOrder(loadOrder(me));
+  }, [me?.email]);
+
+  const visibleTabs = useMemo(
+    () => orderTabs(tabs.filter((tab) => !tab.roles || hasRole(me, tab.roles)), navOrder),
+    [me, navOrder]
+  );
+
+  function reorder(from, to) {
+    const next = moveItem(visibleTabs, from, to).map((tab) => tab.to);
+    setNavOrder(next);
+    saveOrder(me, next);
+  }
+
+  function resetOrder() {
+    clearOrder(me);
+    setNavOrder(null);
+  }
 
   useEffect(() => {
     // Roles without a dashboard land on their own first page instead.
@@ -85,10 +110,67 @@ export default function Layout() {
           <h1 className="text-lg font-semibold text-white">Fleet Command Services</h1>
           <p className="mt-1 text-xs text-slate-400">ALPR · Semis · Vehicles</p>
         </div>
+        <div className="flex items-center justify-between px-3 pt-3 text-xs">
+          <span className="font-semibold uppercase tracking-wider text-slate-500">Menu</span>
+          <div className="flex gap-3">
+            {reordering ? (
+              <button type="button" onClick={resetOrder} className="text-slate-400 hover:text-white">
+                Reset
+              </button>
+            ) : null}
+            <button
+              type="button"
+              onClick={() => setReordering((on) => !on)}
+              className="text-teal-300 hover:underline"
+            >
+              {reordering ? "Done" : "Reorder"}
+            </button>
+          </div>
+        </div>
         <nav className="flex-1 space-y-1 overflow-y-auto p-3">
-          {tabs
-            .filter((tab) => !tab.roles || hasRole(me, tab.roles))
-            .map((tab) => (
+          {reordering ? (
+            <p className="px-1 pb-2 text-xs text-slate-500">
+              Drag a tab, or use the arrows, to change the order. Saved for your account on this computer.
+            </p>
+          ) : null}
+          {visibleTabs.map((tab, index) =>
+            reordering ? (
+              <div
+                key={tab.to}
+                draggable
+                onDragStart={() => setDragFrom(index)}
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={() => {
+                  if (dragFrom !== null) reorder(dragFrom, index);
+                  setDragFrom(null);
+                }}
+                onDragEnd={() => setDragFrom(null)}
+                className={`flex cursor-grab items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-sm font-medium ${
+                  dragFrom === index ? "border-teal-400 bg-teal-500/10 text-teal-200" : "border-slate-700 text-slate-300"
+                }`}
+              >
+                <span aria-hidden className="select-none text-slate-500">⠿</span>
+                <span className="min-w-0 flex-1 truncate">{tab.label}</span>
+                <button
+                  type="button"
+                  disabled={index === 0}
+                  onClick={() => reorder(index, index - 1)}
+                  aria-label={`Move ${tab.label} up`}
+                  className="px-1 text-slate-400 hover:text-white disabled:opacity-30"
+                >
+                  ↑
+                </button>
+                <button
+                  type="button"
+                  disabled={index === visibleTabs.length - 1}
+                  onClick={() => reorder(index, index + 1)}
+                  aria-label={`Move ${tab.label} down`}
+                  className="px-1 text-slate-400 hover:text-white disabled:opacity-30"
+                >
+                  ↓
+                </button>
+              </div>
+            ) : (
               <NavLink
                 key={tab.to}
                 to={tab.to}
@@ -101,7 +183,8 @@ export default function Layout() {
               >
                 {tab.label}
               </NavLink>
-            ))}
+            )
+          )}
         </nav>
         <div className="border-t border-slate-800 px-5 py-4 text-xs text-slate-500">
           <p>{me?.full_name || "Signed in"}</p>

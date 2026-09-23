@@ -112,6 +112,25 @@ export default function Parts() {
     }
   }
 
+  async function removePart(part) {
+    const confirmed = window.confirm(
+      `Remove ${part.sku}?\n\nIf the part has stock or repair history it is retired instead of deleted, so that history stays intact.`,
+    );
+    if (!confirmed) return;
+    setError("");
+    try {
+      const result = await api(`/parts/${part.id}`, { method: "DELETE" });
+      setSuccess(result.detail || `${part.sku} deleted.`);
+      if (selected?.id === part.id) {
+        setSelected(null);
+        setHistory([]);
+      }
+      await load();
+    } catch (err) {
+      setError(displayApiError(err, me));
+    }
+  }
+
   async function submitTxn(event) {
     event.preventDefault();
     if (!selected) return;
@@ -219,6 +238,15 @@ export default function Parts() {
                     }}
                   >
                     Transact
+                  </button>
+                ) : null}
+                {canManageInventory ? (
+                  <button
+                    type="button"
+                    className="text-xs font-semibold text-red-700 hover:underline"
+                    onClick={() => removePart(r)}
+                  >
+                    Delete
                   </button>
                 ) : null}
               </div>

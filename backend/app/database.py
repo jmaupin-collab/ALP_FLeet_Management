@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, select, text
+from sqlalchemy import create_engine, func, select, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -76,6 +76,69 @@ def normalize_legacy_role_values() -> int:
     return updated
 
 
+def _backfill_customer_agency_ids(db: Session) -> int:
+    from app.models import Asset, AssetAuthorization, User, UserRole
+
+    updated = 0
+    customers = db.scalars(
+        select(User).where(User.role == UserRole.CUSTOMER, User.agency_id.is_(None))
+    ).all()
+    for customer in customers:
+        agencies = set(
+            db.scalars(
+                select(Asset.agency_id)
+                .join(AssetAuthorization, AssetAuthorization.asset_id == Asset.id)
+                .where(AssetAuthorization.user_id == customer.id)
+                .where(AssetAuthorization.can_view.is_(True))
+                .where(Asset.organization_id == customer.organization_id)
+            ).all()
+        )
+        agencies.discard(None)
+        if len(agencies) == 1:
+            customer.agency_id = agencies.pop()
+            updated += 1
+    if updated:
+        db.commit()
+    return updated
+
+
+def backfill_customer_agency_ids(db: Session | None = None) -> int:
+    """Scope pre-existing customer accounts to the agency their assets already share.
+
+    Customer visibility became agency-scoped after these accounts were created,
+    so without this they would silently see nothing. An account is only assigned
+    when every asset already granted to it sits in exactly one agency, which
+    makes the result a narrowing of what that customer could previously see.
+    Ambiguous accounts are deliberately left unassigned: seeing nothing until an
+    admin sets the agency is the safe failure.
+    """
+    if db is not None:
+        return _backfill_customer_agency_ids(db)
+    with SessionLocal() as owned:
+        return _backfill_customer_agency_ids(owned)
+
+
+def _count_unscoped_customers(db: Session) -> int:
+    from app.models import User, UserRole
+
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.role == UserRole.CUSTOMER, User.agency_id.is_(None))
+        )
+        or 0
+    )
+
+
+def count_unscoped_customers(db: Session | None = None) -> int:
+    """Customer accounts left without an agency, which therefore see no assets."""
+    if db is not None:
+        return _count_unscoped_customers(db)
+    with SessionLocal() as owned:
+        return _count_unscoped_customers(owned)
+
+
 def migrate_directory_org_ids() -> None:
     """Migrate existing directory records to have organization_id."""
     from app.models import Organization, Warehouse, Agency, Vendor
@@ -112,6 +175,8 @@ def migrate_directory_org_ids() -> None:
 # Each entry is (sqlite_type, postgres_type). create_all still creates brand-new tables.
 ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str]]] = {
     "assets": [
+        ("license_plate", "VARCHAR(16)", "VARCHAR(16)"),
+        ("license_plate_state", "VARCHAR(2)", "VARCHAR(2)"),
         ("current_custody_type", "VARCHAR(64)", "VARCHAR(64)"),
         ("carrier_name", "VARCHAR(255)", "VARCHAR(255)"),
         ("tracking_code", "VARCHAR(64)", "VARCHAR(64)"),
@@ -128,6 +193,9 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str]]] = {
         ("current_odometer_miles", "NUMERIC(12,2)", "NUMERIC(12,2)"),
         ("current_engine_hours", "NUMERIC(10,2)", "NUMERIC(10,2)"),
         ("organization_id", "CHAR(32)", "UUID"),
+    ],
+    "asset_documents": [
+        ("reminder_days", "INTEGER DEFAULT 30", "INTEGER DEFAULT 30"),
     ],
     "deployments": [
         ("custody_type", "VARCHAR(64)", "VARCHAR(64)"),
@@ -177,6 +245,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str]]] = {
     ],
     "users": [
         ("organization_id", "CHAR(32)", "UUID"),
+        ("agency_id", "CHAR(32)", "UUID"),
         ("last_login_at", "DATETIME", "TIMESTAMP WITH TIME ZONE"),
         ("password_reset_token", "VARCHAR(255)", "VARCHAR(255)"),
         ("password_reset_expires", "DATETIME", "TIMESTAMP WITH TIME ZONE"),

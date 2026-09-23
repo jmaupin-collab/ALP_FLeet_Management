@@ -1,10 +1,13 @@
 """Geocode entered addresses to street-level coordinates when possible."""
 
+import logging
 import re
 from decimal import Decimal
 from typing import Optional, Tuple
 
 import requests
+
+logger = logging.getLogger("fleet.geocoding")
 
 _CITY_STATE_ZIP = re.compile(
     r"^[A-Za-z][A-Za-z0-9\s\.\-']+,\s*[A-Za-z]{2}(\s+\d{5}(-\d{4})?)?$"
@@ -34,6 +37,44 @@ def geocode_address(address: str) -> Optional[Tuple[Decimal, Decimal]]:
         return None
     text = address.strip()
     return _geocode_census(text) or _geocode_nominatim(text)
+
+
+def geocode_directory_address(
+    address: str | None,
+    *,
+    label: str,
+    existing: tuple[Decimal | None, Decimal | None] = (None, None),
+) -> tuple[Decimal | None, Decimal | None]:
+    """Resolve coordinates for a warehouse or agency address.
+
+    Both directory types share this so they geocode identically. Failure is not
+    fatal: the entered address is still saved, any existing coordinates survive,
+    and a warning is logged. A city/state line never replaces coordinates that
+    were already resolved, because that would drag a precise pin to a centroid.
+    """
+    current_lat, current_lng = existing
+    has_existing = current_lat is not None and current_lng is not None
+    text = (address or "").strip()
+    if not text:
+        return current_lat, current_lng
+
+    if has_existing and not looks_like_street_address(text):
+        logger.info(
+            "%s address %r is not street-level; keeping the more precise existing coordinates.",
+            label,
+            text,
+        )
+        return current_lat, current_lng
+
+    coords = geocode_address(text)
+    if coords is None:
+        logger.warning(
+            "Could not geocode %s address %r. The address was saved; coordinates left unchanged.",
+            label,
+            text,
+        )
+        return current_lat, current_lng
+    return coords[0], coords[1]
 
 
 def _session() -> requests.Session:
@@ -67,7 +108,7 @@ def _geocode_census(address: str) -> Optional[Tuple[Decimal, Decimal]]:
         coords = matches[0].get("coordinates") or {}
         return _as_coords(coords.get("y"), coords.get("x"))
     except Exception as exc:
-        print(f"Census geocoding failed for address '{address}': {exc}")
+        logger.warning("Census geocoding failed for address %r: %s", address, exc)
         return None
 
 
@@ -95,7 +136,7 @@ def _geocode_nominatim(address: str) -> Optional[Tuple[Decimal, Decimal]]:
             return None
         return _as_coords(best.get("lat"), best.get("lon"))
     except Exception as exc:
-        print(f"Nominatim geocoding failed for address '{address}': {exc}")
+        logger.warning("Nominatim geocoding failed for address %r: %s", address, exc)
         return None
 
 

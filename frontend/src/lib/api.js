@@ -71,7 +71,7 @@ export async function api(path, options = {}) {
   return response.json();
 }
 
-export async function downloadCsv(path, filename) {
+export async function downloadFile(path, filename, forbiddenMessage) {
   const token = getToken();
   const headers = {};
   if (token) headers.Authorization = `Bearer ${token}`;
@@ -87,8 +87,8 @@ export async function downloadCsv(path, filename) {
     if (response.status === 401) {
       clearToken();
       detail = "Your session expired. Sign in again.";
-    } else if (response.status === 403) {
-      detail = "CSV export requires a fleet manager or admin role.";
+    } else if (response.status === 403 && forbiddenMessage) {
+      detail = forbiddenMessage;
     }
     const err = new Error(detail);
     err.status = response.status;
@@ -103,4 +103,14 @@ export async function downloadCsv(path, filename) {
   link.click();
   link.remove();
   URL.revokeObjectURL(link.href);
+}
+
+export function downloadCsv(path, filename) {
+  return downloadFile(path, filename, "CSV export requires a fleet manager or admin role.");
+}
+
+export function uploadFile(path, file, field = "file") {
+  const body = new FormData();
+  body.append(field, file);
+  return api(path, { method: "POST", body });
 }

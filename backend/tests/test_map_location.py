@@ -463,3 +463,63 @@ def test_agency_address_geocodes_and_drives_map_on_deploy(client, org_users, mon
     pin = map_pin(client, headers, org_users["asset"].id)
     assert pytest.approx(pin["latitude"], abs=1e-4) == 33.4484
     assert pytest.approx(pin["longitude"], abs=1e-4) == -112.0740
+
+
+def test_starting_a_deployment_names_the_location_from_the_agency(client, org_users):
+    """The form sends only the agency; the server supplies the location name."""
+    headers = login(client)
+    agency = org_users["agency"]
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={"custody_type": "Customer / LE Agency", "agency_id": str(agency.id)},
+    )
+
+    assert started.status_code == 200, started.text
+    assert started.json()["current_location"] == agency.name
+
+    pin = map_pin(client, headers, org_users["asset"].id)
+    assert pytest.approx(pin["latitude"], abs=1e-4) == float(agency.latitude)
+    assert pin["location_source"] == "customer"
+
+
+def test_starting_a_warehouse_deployment_names_the_location_from_the_warehouse(client, org_users):
+    headers = login(client)
+    warehouse = org_users["warehouse"]
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={"custody_type": "Warehouse Depot", "warehouse_id": str(warehouse.id)},
+    )
+
+    assert started.status_code == 200, started.text
+    assert started.json()["current_location"] == warehouse.name
+
+
+def test_starting_a_deployment_with_no_site_and_no_location_is_rejected(client, org_users):
+    """Without a site link there is nothing to derive a location from."""
+    headers = login(client)
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={"custody_type": "Customer / LE Agency"},
+    )
+
+    assert started.status_code == 422
+
+
+def test_a_location_string_alone_still_works_for_a_site_not_in_the_directory(client, org_users):
+    headers = login(client)
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={"custody_type": "Customer / LE Agency", "location": "Pop-up site, Mesa AZ"},
+    )
+
+    assert started.status_code == 200, started.text
+    assert started.json()["current_location"] == "Pop-up site, Mesa AZ"
+

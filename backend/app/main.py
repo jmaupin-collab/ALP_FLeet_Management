@@ -11,6 +11,15 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.analytics import build_analytics
 from app.auth import create_access_token, hash_password, verify_password
+from app.bulk_import import (
+    COLUMNS as IMPORT_COLUMNS,
+    ImportFileError,
+    MAX_IMPORT_ROWS,
+    parse_sheet,
+    prepare_rows,
+    template_csv,
+    template_xlsx,
+)
 from app.checklists import checklist_for
 from app.config import get_settings
 from app.database import SessionLocal, ensure_schema, get_db
@@ -45,6 +54,7 @@ from app.models import (
 )
 from app.rbac import (
     can_access_organization,
+    canonical_role,
     filter_assets_by_access,
     is_customer,
     filter_by_authorized_assets,
@@ -67,6 +77,8 @@ from app.schemas import (
     AnalyticsHub,
     AssetAuthorizationGrant,
     AssetCreate,
+    AssetImportResult,
+    AssetImportRow,
     AssetOut,
     AssetTimeline,
     AssetUpdate,
@@ -134,7 +146,12 @@ from app.ops import (
     update_work_order,
 )
 from app.attention import router as attention_router
-from app.database import migrate_directory_org_ids, normalize_legacy_role_values
+from app.database import (
+    backfill_customer_agency_ids,
+    count_unscoped_customers,
+    migrate_directory_org_ids,
+    normalize_legacy_role_values,
+)
 from app.documents import router as documents_router
 from app.inspection_photos import photo_response
 from app.inventory import router as inventory_router
@@ -174,6 +191,16 @@ async def lifespan(_app: FastAPI):
     normalized = normalize_legacy_role_values()
     if normalized:
         logger.info("Normalized %d user rows from legacy role values.", normalized)
+    scoped = backfill_customer_agency_ids()
+    if scoped:
+        logger.info("Scoped %d customer account(s) to their agency.", scoped)
+    unscoped = count_unscoped_customers()
+    if unscoped:
+        logger.warning(
+            "%d customer account(s) have no agency assigned and will see no assets. "
+            "Set an agency on each from the Admin console.",
+            unscoped,
+        )
     if settings.should_seed_demo_data():
         logger.warning("SEED_DEMO_DATA is enabled — creating demo accounts with well-known passwords.")
         db = SessionLocal()
@@ -256,6 +283,113 @@ def list_assets(
     query = filter_assets_by_access(query, current_user, db)
     rows = db.scalars(query).all()
     return [serialize_asset(row) for row in rows]
+
+
+def _org_directory_names(db: Session, model, organization_id: UUID) -> list[str]:
+    return list(
+        db.scalars(
+            select(model.name)
+            .where(model.organization_id == organization_id, model.is_archived.is_(False))
+            .order_by(model.name)
+        ).all()
+    )
+
+
+@app.get("/assets/import/template")
+def get_asset_import_template(
+    file_format: str = Query(default="xlsx", alias="format", pattern="^(xlsx|csv)$"),
+    current_user: User = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> Response:
+    """Download an import sheet carrying the expected headers and this org's site names."""
+    warehouses = _org_directory_names(db, Warehouse, current_user.organization_id)
+    agencies = _org_directory_names(db, Agency, current_user.organization_id)
+
+    if file_format == "csv":
+        content = template_csv(warehouses, agencies)
+        media_type = "text/csv; charset=utf-8"
+        filename = "asset-import-template.csv"
+    else:
+        content = template_xlsx(warehouses, agencies)
+        media_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        filename = "asset-import-template.xlsx"
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/assets/import/columns")
+def get_asset_import_columns(
+    current_user: User = Depends(require_operator),
+) -> dict:
+    """Column reference so the upload screen can explain the format without hardcoding it."""
+    return {
+        "max_rows": MAX_IMPORT_ROWS,
+        "columns": [
+            {"label": column.label, "required": column.required, "help": column.help}
+            for column in IMPORT_COLUMNS
+        ],
+    }
+
+
+@app.post("/assets/import", response_model=AssetImportResult)
+async def import_assets(
+    file: UploadFile = File(...),
+    commit: bool = Query(default=False, description="Validate only; set true to write the rows."),
+    current_user: User = Depends(require_operator),
+    db: Session = Depends(get_db),
+) -> AssetImportResult:
+    """Validate a spreadsheet of assets, and write it only when every row is clean.
+
+    The default dry run lets the caller show row-level errors before anything is
+    created. A commit runs in one transaction, so the upload is all or nothing.
+    """
+    data = await file.read()
+    try:
+        parsed = parse_sheet(file.filename or "", data)
+        prepared = prepare_rows(db, parsed, current_user.organization_id)
+    except ImportFileError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+
+    rows = [
+        AssetImportRow(
+            row_number=row.row_number,
+            vin=row.vin,
+            make_model=row.make_model,
+            errors=row.errors,
+        )
+        for row in prepared
+    ]
+    error_rows = sum(1 for row in prepared if row.errors)
+    result = AssetImportResult(
+        filename=file.filename or "upload",
+        committed=False,
+        total_rows=len(prepared),
+        valid_rows=len(prepared) - error_rows,
+        error_rows=error_rows,
+        rows=rows,
+    )
+
+    # A dry run, or a commit the file has not earned yet, both stop here with the
+    # per-row detail intact so the caller can show what needs fixing.
+    if not commit or error_rows:
+        return result
+
+    by_row = {row.row_number: row for row in rows}
+    try:
+        for row in prepared:
+            asset = create_asset(db, row.payload, current_user.id, commit=False)
+            by_row[row.row_number].created_asset_id = asset.id
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    result.committed = True
+    result.created_count = len(prepared)
+    return result
 
 
 @app.get("/assets/{asset_id}", response_model=AssetOut)
@@ -1064,6 +1198,31 @@ def _load_manageable_user(db: Session, actor: User, user_id: UUID) -> User:
     return user
 
 
+def _resolve_customer_agency(db: Session, actor: User, role: UserRole, agency_id: UUID | None) -> UUID | None:
+    """Validate the agency scope for an account about to be saved.
+
+    Customers must name exactly one agency inside the actor's organization;
+    every other role carries none, so an account that stops being a customer
+    also stops being agency-scoped.
+    """
+    if canonical_role(role) != UserRole.CUSTOMER:
+        return None
+
+    if agency_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Customer accounts must be assigned to an agency.",
+        )
+
+    agency = db.get(Agency, agency_id)
+    if agency is None or agency.organization_id != actor.organization_id or agency.is_archived:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Agency not found",
+        )
+    return agency.id
+
+
 def _reject_protected_account(user: User, action: str) -> None:
     if user.email.lower() in settings.protected_admin_email_set:
         raise HTTPException(
@@ -1091,6 +1250,7 @@ def create_user(
 
     user = User(
         organization_id=current_user.organization_id,
+        agency_id=_resolve_customer_agency(db, current_user, payload.role, payload.agency_id),
         email=email,
         hashed_password=hash_password(payload.password),
         full_name=payload.full_name,
@@ -1114,6 +1274,8 @@ def update_user(
     """Update a user's information."""
     user = _load_manageable_user(db, current_user, user_id)
     is_self = user.id == current_user.id
+    role_changing = payload.role is not None and payload.role != user.role
+    agency_provided = "agency_id" in payload.model_fields_set
 
     if payload.role is not None and payload.role != user.role:
         require_assignable_role(current_user, payload.role)
@@ -1141,6 +1303,13 @@ def update_user(
 
     if payload.role is not None:
         user.role = payload.role
+
+    # Keep the agency scope consistent with the role: assign it, replace it, or
+    # clear it when the account stops being a customer. Untouched accounts are
+    # left alone so an unrelated edit does not fail on a legacy row.
+    if role_changing or agency_provided:
+        requested_agency = payload.agency_id if agency_provided else user.agency_id
+        user.agency_id = _resolve_customer_agency(db, current_user, user.role, requested_agency)
 
     if payload.is_active is not None:
         if is_self and not payload.is_active:
@@ -1228,6 +1397,19 @@ def grant_asset_authorization(
         )
 
     asset = require_asset_access(db, current_user, payload.asset_id)
+
+    # A grant outside the customer's agency would be invisible to them anyway,
+    # so refuse it here rather than leaving a misleading row behind.
+    if user.agency_id is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="This customer is not assigned to an agency yet. Set their agency before assigning assets.",
+        )
+    if asset.agency_id != user.agency_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="That asset is not currently assigned to this customer's agency.",
+        )
 
     existing = db.scalar(
         select(AssetAuthorization)

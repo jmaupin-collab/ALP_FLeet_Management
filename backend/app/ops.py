@@ -86,7 +86,8 @@ def _apply_party_links(db: Session, asset: Asset, warehouse_id: UUID | None, age
     return location
 
 
-def create_asset(db: Session, payload: AssetCreate, user_id: UUID | None) -> Asset:
+def create_asset(db: Session, payload: AssetCreate, user_id: UUID | None, commit: bool = True) -> Asset:
+    """Create one asset. Pass commit=False to batch several into one transaction."""
     # Get user to obtain organization_id
     from app.models import User
     user = db.execute(select(User).where(User.id == user_id)).scalar_one_or_none()
@@ -106,6 +107,8 @@ def create_asset(db: Session, payload: AssetCreate, user_id: UUID | None) -> Ass
     
     asset = Asset(
         vin=vin,
+        license_plate=payload.license_plate,
+        license_plate_state=payload.license_plate_state,
         make_model=payload.make_model.strip(),
         initial_purchase_cost=payload.initial_purchase_cost,
         current_location=payload.current_location.strip(),
@@ -142,7 +145,10 @@ def create_asset(db: Session, payload: AssetCreate, user_id: UUID | None) -> Ass
             )
         )
     
-    db.commit()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
     return get_asset(db, asset.id)
 
 
@@ -238,6 +244,11 @@ def update_asset_details(db: Session, asset: Asset, payload: AssetUpdate, user_i
     data = payload.model_dump(exclude_unset=True)
     if "vin" in data and data["vin"]:
         asset.vin = _unique_vin(db, data["vin"], exclude_id=asset.id)
+    # Sending an explicit null clears the plate, so presence is what matters.
+    if "license_plate" in data:
+        asset.license_plate = data["license_plate"]
+    if "license_plate_state" in data:
+        asset.license_plate_state = data["license_plate_state"]
     if "make_model" in data and data["make_model"]:
         asset.make_model = data["make_model"].strip()
     if "initial_purchase_cost" in data and data["initial_purchase_cost"] is not None:
@@ -312,12 +323,15 @@ def delete_asset(db: Session, asset: Asset, force: bool = False) -> None:
 def start_deployment(db: Session, asset: Asset, payload: DeploymentStart, user_id: UUID | None) -> Asset:
     require_not_archived(asset)
     agency_id = payload.agency_id
+    typed_location = (payload.location or "").strip()
     if payload.custody_type == CustodyType.CUSTOMER_AGENCY and agency_id is None:
         from app.location import resolve_agency_by_location
-        matched = resolve_agency_by_location(db, asset.organization_id, payload.location)
+        matched = resolve_agency_by_location(db, asset.organization_id, typed_location)
         if matched:
             agency_id = matched.id
-    location = _apply_party_links(db, asset, payload.warehouse_id, agency_id, payload.location.strip())
+    # A linked warehouse or agency names the location; the typed string is only
+    # the fallback for a site that is not in the directory.
+    location = _apply_party_links(db, asset, payload.warehouse_id, agency_id, typed_location)
     apply_from_payload = CustodyUpdate(
         custody_type=payload.custody_type,
         location=location,
@@ -897,15 +911,10 @@ def list_vendors(db: Session, organization_id: UUID, include_archived: bool = Fa
 
 
 def create_warehouse(db: Session, payload: DirectoryCreate, organization_id: UUID, user_id: UUID | None) -> Warehouse:
-    # Geocode address if provided
-    latitude = None
-    longitude = None
-    if payload.address:
-        from app.geocoding import geocode_address
-        coords = geocode_address(payload.address)
-        if coords:
-            latitude, longitude = coords
-    
+    from app.geocoding import geocode_directory_address
+
+    latitude, longitude = geocode_directory_address(payload.address, label="Warehouse")
+
     row = Warehouse(
         organization_id=organization_id,
         name=payload.name.strip(),
@@ -925,15 +934,12 @@ def create_warehouse(db: Session, payload: DirectoryCreate, organization_id: UUI
 
 
 def create_agency(db: Session, payload: DirectoryCreate, organization_id: UUID, user_id: UUID | None) -> Agency:
-    # Geocode address if provided
-    latitude = None
-    longitude = None
-    if payload.address:
-        from app.geocoding import geocode_address
-        coords = geocode_address(payload.address)
-        if coords:
-            latitude, longitude = coords
-    
+    from app.geocoding import geocode_directory_address
+
+    # Same helper as warehouses: deployments to this agency need reliable
+    # coordinates for the map fallback.
+    latitude, longitude = geocode_directory_address(payload.address, label="Agency")
+
     row = Agency(
         organization_id=organization_id,
         name=payload.name.strip(),
@@ -942,6 +948,7 @@ def create_agency(db: Session, payload: DirectoryCreate, organization_id: UUID, 
         address=payload.address,
         latitude=latitude,
         longitude=longitude,
+        created_by_id=user_id,
     )
     db.add(row)
     try:
@@ -973,14 +980,17 @@ def create_vendor(db: Session, payload: DirectoryCreate, organization_id: UUID, 
 def patch_directory(db: Session, row, payload: DirectoryUpdate, user_id: UUID | None):
     data = payload.model_dump(exclude_unset=True)
     
-    # Check if address is being updated and geocode it
-    if 'address' in data and data['address']:
-        from app.geocoding import geocode_address
-        coords = geocode_address(data['address'])
-        if coords:
-            row.latitude = coords[0]
-            row.longitude = coords[1]
-    
+    # Re-geocode when the address changes. Vendors carry no coordinates.
+    if "address" in data and hasattr(row, "latitude"):
+        from app.geocoding import geocode_directory_address
+
+        row.latitude, row.longitude = geocode_directory_address(
+            data["address"],
+            label=type(row).__name__,
+            existing=(row.latitude, row.longitude),
+        )
+
+
     for key, value in data.items():
         if hasattr(row, key):
             setattr(row, key, value.strip() if isinstance(value, str) else value)

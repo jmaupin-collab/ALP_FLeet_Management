@@ -33,6 +33,7 @@ from app.schemas import (
     DashboardKpis,
     DeploymentOut,
     InspectionOut,
+    NonAlprInventoryRow,
     TimelineEvent,
     WorkOrderOut,
 )
@@ -77,6 +78,11 @@ def is_retired(asset: Asset) -> bool:
         asset.is_archived
         or asset.operational_status in {AssetOperationalStatus.RETIRED, AssetOperationalStatus.OUT_OF_SERVICE}
     )
+
+
+# Deployment readiness is modeled for ALPR Trailers only. Semi Trucks and Fleet
+# Vehicles are tracked as inventory until they get their own lifecycle.
+OPERATIONAL_ASSET_TYPE = AssetType.ALPR_TRAILER
 
 
 def resolve_operational_status(
@@ -224,7 +230,14 @@ def asset_query(
         stmt = stmt.where(Asset.is_archived.is_(False))
     if q:
         like = f"%{q.strip()}%"
-        stmt = stmt.where(or_(Asset.vin.ilike(like), Asset.make_model.ilike(like), Asset.current_location.ilike(like)))
+        stmt = stmt.where(
+            or_(
+                Asset.vin.ilike(like),
+                Asset.license_plate.ilike(like),
+                Asset.make_model.ilike(like),
+                Asset.current_location.ilike(like),
+            )
+        )
     if asset_type:
         stmt = stmt.where(Asset.asset_type == asset_type)
     if location:
@@ -232,8 +245,17 @@ def asset_query(
     return stmt.order_by(Asset.make_model)
 
 
-def dashboard_kpis(db: Session, organization_id: UUID, current_user=None) -> DashboardKpis:
+def dashboard_kpis(
+    db: Session,
+    organization_id: UUID,
+    current_user=None,
+    operational_asset_type: AssetType = OPERATIONAL_ASSET_TYPE,
+) -> DashboardKpis:
     """Fleet rollup in three queries rather than loading every child row.
+
+    Readiness counts are an ALPR Trailer concept, so the headline numbers cover
+    that type only. Semi Trucks and Fleet Vehicles are still queried and still
+    returned, as a plain inventory rollup in non_alpr_inventory.
 
     Status still comes from resolve_operational_status(), so these numbers match
     what the asset list and map report.
@@ -286,6 +308,8 @@ def dashboard_kpis(db: Session, organization_id: UUID, current_user=None) -> Das
             "in_transit": 0,
             "maintenance": 0,
             "idle": 0,
+            "out_of_service": 0,
+            "retired": 0,
             "cost": Decimal("0"),
             "downtime": Decimal("0"),
         }
@@ -317,34 +341,54 @@ def dashboard_kpis(db: Session, organization_id: UUID, current_user=None) -> Das
             bucket["in_transit"] += 1
         elif status == AssetOperationalStatus.MAINTENANCE:
             bucket["maintenance"] += 1
+        elif status == AssetOperationalStatus.RETIRED:
+            # resolve_operational_status() folds both terminal states into
+            # RETIRED; split them back apart for the dashboard cards.
+            if row.operational_status == AssetOperationalStatus.OUT_OF_SERVICE:
+                bucket["out_of_service"] += 1
+            else:
+                bucket["retired"] += 1
         else:
             bucket["idle"] += 1
 
-    by_type = [
-        AssetTypeKpis(
+    def as_type_kpis(asset_type, bucket) -> AssetTypeKpis:
+        return AssetTypeKpis(
             asset_type=asset_type,
             total_assets=bucket["count"],
             deployed=bucket["deployed"],
             in_maintenance=bucket["maintenance"],
-            idle_or_stored=bucket["idle"],
+            # Unchanged meaning: everything not deployed, available, in transit,
+            # or in maintenance, including the two terminal states.
+            idle_or_stored=bucket["idle"] + bucket["out_of_service"] + bucket["retired"],
             total_purchase_cost=bucket["cost"],
             downtime_hours_ytd=bucket["downtime"],
         )
-        for asset_type, bucket in totals.items()
-    ]
 
-    def fleet_total(key: str):
-        return sum(bucket[key] for bucket in totals.values())
-
+    operational = totals[operational_asset_type]
     return DashboardKpis(
-        fleet_size=len(assets),
-        deployed=fleet_total("deployed"),
-        available=fleet_total("available"),
-        in_transit=fleet_total("in_transit"),
-        in_maintenance=fleet_total("maintenance"),
-        total_purchase_cost=sum((bucket["cost"] for bucket in totals.values()), Decimal("0")),
-        downtime_hours_ytd=sum((bucket["downtime"] for bucket in totals.values()), Decimal("0")),
-        by_asset_type=by_type,
+        asset_type_scope=operational_asset_type.value,
+        fleet_size=operational["count"],
+        deployed=operational["deployed"],
+        available=operational["available"],
+        in_transit=operational["in_transit"],
+        in_maintenance=operational["maintenance"],
+        out_of_service=operational["out_of_service"],
+        retired=operational["retired"],
+        total_purchase_cost=operational["cost"],
+        downtime_hours_ytd=operational["downtime"],
+        by_asset_type=[as_type_kpis(operational_asset_type, operational)],
+        non_alpr_inventory=[
+            NonAlprInventoryRow(
+                asset_type=asset_type,
+                total_assets=bucket["count"],
+                in_service=bucket["count"] - bucket["out_of_service"] - bucket["retired"],
+                out_of_service=bucket["out_of_service"],
+                retired=bucket["retired"],
+                total_purchase_cost=bucket["cost"],
+            )
+            for asset_type, bucket in totals.items()
+            if asset_type != operational_asset_type
+        ],
     )
 
 
