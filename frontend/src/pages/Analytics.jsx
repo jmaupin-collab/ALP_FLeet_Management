@@ -4,7 +4,7 @@ import { DataTable } from "../components/DataTable";
 import { Notice } from "../components/Modal.jsx";
 import { api, downloadCsv } from "../lib/api.js";
 import { ASSET_TYPES } from "../lib/constants.js";
-import { hours, money } from "../lib/format.jsx";
+import { Badge, hours, money } from "../lib/format.jsx";
 
 const EMPTY = {
   asset_type: "All",
@@ -34,6 +34,7 @@ export default function Analytics() {
   const [deploymentChartType, setDeploymentChartType] = useState("bar");
   const [hub, setHub] = useState(EMPTY);
   const [utilization, setUtilization] = useState([]);
+  const [utilizationType, setUtilizationType] = useState("");
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
@@ -59,15 +60,24 @@ export default function Analytics() {
   useEffect(() => {
     const query = assetType ? `?asset_type=${encodeURIComponent(assetType)}` : "";
     setLoading(true);
-    Promise.all([api(`/analytics${query}`), api("/analytics/utilization").catch(() => [])])
-      .then(([data, util]) => {
+    api(`/analytics${query}`)
+      .then((data) => {
         setHub(data);
-        setUtilization(util);
         setError("");
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   }, [assetType]);
+
+  // Utilization carries its own filter rather than following the page one: it is
+  // a long list you read on its own terms, and narrowing it usually has nothing
+  // to do with what the charts above are scoped to.
+  useEffect(() => {
+    const query = utilizationType ? `?asset_type=${encodeURIComponent(utilizationType)}` : "";
+    api(`/analytics/utilization${query}`)
+      .then(setUtilization)
+      .catch(() => setUtilization([]));
+  }, [utilizationType]);
 
   const handleDragStart = (e, sectionId) => {
     setDraggedItem(sectionId);
@@ -333,7 +343,9 @@ export default function Analytics() {
         <div className="flex items-start justify-between">
           <div>
             <h3 className="text-sm font-semibold text-slate-800">Deployment Activity (Last 12 Months)</h3>
-            <p className="mt-1 text-xs text-slate-500">Monthly deployment counts and fleet utilization percentage.</p>
+            <p className="mt-1 text-xs text-slate-500">
+              Deployments started each month — custody passing to an agency — and the share of the fleet that went out.
+            </p>
           </div>
           <div className="flex gap-2">
             <button
@@ -365,12 +377,12 @@ export default function Analytics() {
                 <Tooltip
                   formatter={(value, name) => {
                     if (name === "Deployments") return [value, name];
-                    if (name === "Utilization %") return [`${value}%`, name];
+                    if (name === "% of fleet deployed") return [`${value}%`, name];
                     return [value, name];
                   }}
                 />
                 <Bar yAxisId="left" dataKey="deployment_count" name="Deployments" fill="#0d9488" radius={[6, 6, 0, 0]} isAnimationActive={false} />
-                <Bar yAxisId="right" dataKey="deployment_percentage" name="Utilization %" fill="#06b6d4" radius={[6, 6, 0, 0]} isAnimationActive={false} />
+                <Bar yAxisId="right" dataKey="deployment_percentage" name="% of fleet deployed" fill="#06b6d4" radius={[6, 6, 0, 0]} isAnimationActive={false} />
               </BarChart>
             )}
             {deploymentChartType === "line" && (
@@ -382,12 +394,12 @@ export default function Analytics() {
                 <Tooltip
                   formatter={(value, name) => {
                     if (name === "Deployments") return [value, name];
-                    if (name === "Utilization %") return [`${value}%`, name];
+                    if (name === "% of fleet deployed") return [`${value}%`, name];
                     return [value, name];
                   }}
                 />
                 <Line yAxisId="left" type="monotone" dataKey="deployment_count" name="Deployments" stroke="#0d9488" strokeWidth={2} dot={{ fill: "#0d9488", r: 4 }} isAnimationActive={false} />
-                <Line yAxisId="right" type="monotone" dataKey="deployment_percentage" name="Utilization %" stroke="#06b6d4" strokeWidth={2} dot={{ fill: "#06b6d4", r: 4 }} isAnimationActive={false} />
+                <Line yAxisId="right" type="monotone" dataKey="deployment_percentage" name="% of fleet deployed" stroke="#06b6d4" strokeWidth={2} dot={{ fill: "#06b6d4", r: 4 }} isAnimationActive={false} />
               </LineChart>
             )}
           </ResponsiveContainer>
@@ -469,10 +481,32 @@ export default function Analytics() {
           utilization: (
             <DraggableSection key="utilization" id="utilization">
               <section>
-        <h3 className="mb-3 text-sm font-semibold text-slate-800">Asset utilization (lifecycle history)</h3>
+        <div className="mb-3 flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-800">Asset utilization (lifecycle history)</h3>
+            <p className="mt-1 text-xs text-slate-500">
+              {utilizationType
+                ? `${utilizationType} only — utilization compares deployed time against available time.`
+                : "Whole fleet — utilization compares deployed time against available time."}
+            </p>
+          </div>
+          <select
+            value={utilizationType}
+            onChange={(e) => setUtilizationType(e.target.value)}
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+          >
+            <option value="">All asset types</option>
+            {ASSET_TYPES.map((type) => (
+              <option key={type} value={type}>
+                {type}
+              </option>
+            ))}
+          </select>
+        </div>
         <DataTable
           columns={[
             { key: "vin", header: "Asset ID", render: (r) => <span className="font-mono text-xs">{r.vin}</span> },
+            { key: "asset_type", header: "Type", render: (r) => <Badge value={r.asset_type} tone="type" /> },
             { key: "utilization_30d", header: "30-day", render: (r) => `${Number(r.utilization_30d || 0).toFixed(1)}%` },
             { key: "utilization_90d", header: "90-day", render: (r) => `${Number(r.utilization_90d || 0).toFixed(1)}%` },
             { key: "utilization_365d", header: "365-day", render: (r) => `${Number(r.utilization_365d || 0).toFixed(1)}%` },

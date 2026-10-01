@@ -19,6 +19,8 @@ from app.models import (
     InspectionResult,
     InspectionStatus,
     IssueSource,
+    ALL_ASSET_TYPES_SCOPE,
+    OPERATIONAL_ASSET_TYPE,
     MaintenanceWorkOrder,
     RepairChannel,
     WorkOrderEventType,
@@ -78,11 +80,6 @@ def is_retired(asset: Asset) -> bool:
         asset.is_archived
         or asset.operational_status in {AssetOperationalStatus.RETIRED, AssetOperationalStatus.OUT_OF_SERVICE}
     )
-
-
-# Deployment readiness is modeled for ALPR Trailers only. Semi Trucks and Fleet
-# Vehicles are tracked as inventory until they get their own lifecycle.
-OPERATIONAL_ASSET_TYPE = AssetType.ALPR_TRAILER
 
 
 def resolve_operational_status(
@@ -249,13 +246,17 @@ def dashboard_kpis(
     db: Session,
     organization_id: UUID,
     current_user=None,
-    operational_asset_type: AssetType = OPERATIONAL_ASSET_TYPE,
+    operational_asset_type: AssetType | None = OPERATIONAL_ASSET_TYPE,
 ) -> DashboardKpis:
     """Fleet rollup in three queries rather than loading every child row.
 
-    Readiness counts are an ALPR Trailer concept, so the headline numbers cover
-    that type only. Semi Trucks and Fleet Vehicles are still queried and still
-    returned, as a plain inventory rollup in non_alpr_inventory.
+    Readiness counts default to ALPR Trailers, so the headline numbers cover
+    that type only and Semi Trucks and Fleet Vehicles roll up separately in
+    non_alpr_inventory. Pass another type to scope the headline to it instead,
+    or None to total every type together.
+
+    Whatever the scope, the headline numbers are always the sum of by_asset_type,
+    so the cards and the table can never disagree.
 
     Status still comes from resolve_operational_status(), so these numbers match
     what the asset list and map report.
@@ -356,7 +357,11 @@ def dashboard_kpis(
             asset_type=asset_type,
             total_assets=bucket["count"],
             deployed=bucket["deployed"],
+            available=bucket["available"],
+            in_transit=bucket["in_transit"],
             in_maintenance=bucket["maintenance"],
+            out_of_service=bucket["out_of_service"],
+            retired=bucket["retired"],
             # Unchanged meaning: everything not deployed, available, in transit,
             # or in maintenance, including the two terminal states.
             idle_or_stored=bucket["idle"] + bucket["out_of_service"] + bucket["retired"],
@@ -364,19 +369,31 @@ def dashboard_kpis(
             downtime_hours_ytd=bucket["downtime"],
         )
 
-    operational = totals[operational_asset_type]
+    # One scope covers one type; None totals them all. Either way the headline
+    # is the sum of exactly the rows in by_asset_type.
+    in_view = [operational_asset_type] if operational_asset_type else list(AssetType)
+    scope_label = operational_asset_type.value if operational_asset_type else ALL_ASSET_TYPES_SCOPE
+
+    def headline(key: str) -> int:
+        return sum(totals[asset_type][key] for asset_type in in_view)
+
+    def headline_money(key: str) -> Decimal:
+        return sum((totals[asset_type][key] for asset_type in in_view), Decimal("0"))
+
     return DashboardKpis(
-        asset_type_scope=operational_asset_type.value,
-        fleet_size=operational["count"],
-        deployed=operational["deployed"],
-        available=operational["available"],
-        in_transit=operational["in_transit"],
-        in_maintenance=operational["maintenance"],
-        out_of_service=operational["out_of_service"],
-        retired=operational["retired"],
-        total_purchase_cost=operational["cost"],
-        downtime_hours_ytd=operational["downtime"],
-        by_asset_type=[as_type_kpis(operational_asset_type, operational)],
+        asset_type_scope=scope_label,
+        fleet_size=headline("count"),
+        deployed=headline("deployed"),
+        available=headline("available"),
+        in_transit=headline("in_transit"),
+        in_maintenance=headline("maintenance"),
+        out_of_service=headline("out_of_service"),
+        retired=headline("retired"),
+        total_purchase_cost=headline_money("cost"),
+        downtime_hours_ytd=headline_money("downtime"),
+        by_asset_type=[as_type_kpis(asset_type, totals[asset_type]) for asset_type in in_view],
+        # Only the types the headline leaves out; showing all of them again
+        # under "other" when nothing was excluded would just be noise.
         non_alpr_inventory=[
             NonAlprInventoryRow(
                 asset_type=asset_type,
@@ -387,7 +404,7 @@ def dashboard_kpis(
                 total_purchase_cost=bucket["cost"],
             )
             for asset_type, bucket in totals.items()
-            if asset_type != operational_asset_type
+            if asset_type not in in_view
         ],
     )
 
@@ -477,10 +494,13 @@ def _status_for_custody(custody_type: CustodyType) -> DeploymentStatus:
 def apply_custody(db: Session, asset: Asset, payload: CustodyUpdate, user_id: UUID | None) -> Deployment:
     if asset.is_archived:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Asset is archived. Restore it before operational changes.")
-    if payload.custody_type == CustodyType.IN_TRANSIT and not (payload.tracking_code and payload.carrier_name):
+    # The carrier is who has the unit, so it is required. A tracking code often
+    # is not issued until after the pickup, and some moves are driven in-house
+    # with no code at all, so it stays optional.
+    if payload.custody_type == CustodyType.IN_TRANSIT and not payload.carrier_name:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="In-transit custody requires a 3PL carrier name and tracking code.",
+            detail="In-transit custody requires a carrier name.",
         )
     now = datetime.now(UTC)
     from app.models import Agency, AssetOperationalStatus, Warehouse
@@ -580,6 +600,10 @@ def apply_custody(db: Session, asset: Asset, payload: CustodyUpdate, user_id: UU
         address=payload.address,
         location=payload.location,
     )
+    # Sessions run with autoflush off, so a deployment added moments ago is not
+    # yet visible to a query. Without this, reconcile sees zero open rows and
+    # downgrades a just-deployed asset back to Available.
+    db.flush()
     reconcile_asset_deployment_state(db, asset)
     db.commit()
     db.refresh(row)

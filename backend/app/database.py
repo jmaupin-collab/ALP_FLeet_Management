@@ -188,6 +188,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str]]] = {
         ("agency_id", "CHAR(32)", "UUID"),
         ("telematics_provider", "VARCHAR(64)", "VARCHAR(64)"),
         ("telematics_device_id", "VARCHAR(255)", "VARCHAR(255)"),
+        ("telematics_tracking_enabled", "BOOLEAN DEFAULT 0", "BOOLEAN DEFAULT FALSE"),
         ("created_by_id", "CHAR(32)", "UUID"),
         ("updated_by_id", "CHAR(32)", "UUID"),
         ("current_odometer_miles", "NUMERIC(12,2)", "NUMERIC(12,2)"),
@@ -263,6 +264,7 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str]]] = {
         ("country", "VARCHAR(64)", "VARCHAR(64)"),
         ("latitude", "NUMERIC(10,7)", "NUMERIC(10,7)"),
         ("longitude", "NUMERIC(10,7)", "NUMERIC(10,7)"),
+        ("geofence_radius_m", "INTEGER", "INTEGER"),
     ],
     "agencies": [
         ("organization_id", "CHAR(32)", "UUID"),
@@ -274,9 +276,12 @@ ADDITIVE_COLUMNS: dict[str, list[tuple[str, str, str]]] = {
         ("country", "VARCHAR(64)", "VARCHAR(64)"),
         ("latitude", "NUMERIC(10,7)", "NUMERIC(10,7)"),
         ("longitude", "NUMERIC(10,7)", "NUMERIC(10,7)"),
+        ("geofence_radius_m", "INTEGER", "INTEGER"),
     ],
     "vendors": [
         ("organization_id", "CHAR(32)", "UUID"),
+        ("contact_name", "VARCHAR(255)", "VARCHAR(255)"),
+        ("contact_phone", "VARCHAR(64)", "VARCHAR(64)"),
     ],
     "inventory_transactions": [
         ("reverses_transaction_id", "CHAR(32)", "UUID"),

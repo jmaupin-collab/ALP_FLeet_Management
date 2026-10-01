@@ -18,6 +18,9 @@ import Maintenance from "./pages/Maintenance.jsx";
 import Map from "./pages/Map.jsx";
 import Parts from "./pages/Parts.jsx";
 import PreventiveMaintenance from "./pages/PreventiveMaintenance.jsx";
+import PublicRequest from "./pages/PublicRequest.jsx";
+import RequestDetail from "./pages/RequestDetail.jsx";
+import Requests from "./pages/Requests.jsx";
 import WorkOrderDetail from "./pages/WorkOrderDetail.jsx";
 import { ADMINS, ALL_INTERNAL, MANAGERS, OPERATORS, VIEWERS } from "./lib/roles.js";
 
@@ -25,6 +28,9 @@ export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
+      {/* Outside RequireAuth on purpose: anyone can ask for a trailer, and the
+          form must never bounce a visitor to a sign-in page. */}
+      <Route path="/request-alpr" element={<PublicRequest />} />
       <Route element={<RequireAuth />}>
         <Route element={<Layout />}>
           {/* Customers reach only the map and their own inspections. */}
@@ -51,7 +57,17 @@ export default function App() {
                 <DirectoryPage
                   title="Warehouses / Depots"
                   path="/warehouses"
-                  extraFields={[{ key: "address", label: "Address" }]}
+                  extraFields={[
+                    { key: "address", label: "Address" },
+                    {
+                      key: "geofence_radius_m",
+                      label: "Geofence radius (m)",
+                      type: "number",
+                      placeholder: "Default",
+                      hint: "How close a tracked unit must be to count as arrived. Leave blank to use the system default.",
+                      render: (r) => (r.geofence_radius_m ? `${r.geofence_radius_m} m` : "Default"),
+                    },
+                  ]}
                 />
               }
             />
@@ -65,6 +81,14 @@ export default function App() {
                     { key: "agency_type", label: "Type" },
                     { key: "contact_name", label: "Contact" },
                     { key: "address", label: "Address" },
+                    {
+                      key: "geofence_radius_m",
+                      label: "Geofence radius (m)",
+                      type: "number",
+                      placeholder: "Default",
+                      hint: "Arrivals here are announced but never change custody on their own.",
+                      render: (r) => (r.geofence_radius_m ? `${r.geofence_radius_m} m` : "Default"),
+                    },
                   ]}
                 />
               }
@@ -75,7 +99,11 @@ export default function App() {
                 <DirectoryPage
                   title="Vendors"
                   path="/vendors"
-                  extraFields={[{ key: "specialty", label: "Specialty" }]}
+                  extraFields={[
+                    { key: "specialty", label: "Specialty" },
+                    { key: "contact_name", label: "Contact name" },
+                    { key: "contact_phone", label: "Contact number", type: "tel", placeholder: "(555) 123-4567" },
+                  ]}
                 />
               }
             />
@@ -90,6 +118,9 @@ export default function App() {
           <Route element={<RequireRole allowed={MANAGERS} />}>
             <Route path="/documents" element={<Documents />} />
             <Route path="/customer-access" element={<CustomerAccess />} />
+            {/* Matches require_fleet_admin on the backend request endpoints. */}
+            <Route path="/requests" element={<Requests />} />
+            <Route path="/requests/:requestId" element={<RequestDetail />} />
           </Route>
 
           <Route element={<RequireRole allowed={ADMINS} />}>

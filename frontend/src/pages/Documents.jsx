@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import AssetPicker from "../components/AssetPicker.jsx";
 import { DataTable } from "../components/DataTable";
 import { Field, Modal, Notice, inputClass } from "../components/Modal.jsx";
 import { API_BASE, api, displayApiError, getToken } from "../lib/api.js";
@@ -162,6 +163,9 @@ export default function Documents() {
     setForm({ ...emptyUpload, asset_id: assetId || "" });
     setModal(true);
   }
+
+  // Archived units cannot take a new filing, so they never reach the picker.
+  const selectableAssets = useMemo(() => assets.filter((asset) => !asset.is_archived), [assets]);
 
   // One folder per vehicle, including vehicles with nothing on file yet so
   // there is somewhere to drop the first document.
@@ -479,21 +483,12 @@ export default function Documents() {
         <Modal title="Upload document" onClose={() => setModal(false)}>
           <form onSubmit={upload} className="space-y-3">
             <Field label="Vehicle">
-              <select
-                required
-                className={inputClass}
+              <AssetPicker
+                assets={selectableAssets}
                 value={form.asset_id}
-                onChange={(e) => setForm({ ...form, asset_id: e.target.value })}
-              >
-                <option value="">Select vehicle</option>
-                {assets
-                  .filter((asset) => !asset.is_archived)
-                  .map((asset) => (
-                    <option key={asset.id} value={asset.id}>
-                      {asset.make_model} · {asset.license_plate || asset.vin}
-                    </option>
-                  ))}
-              </select>
+                onChange={(assetId) => setForm({ ...form, asset_id: assetId })}
+                inputClass={inputClass}
+              />
             </Field>
             <Field label="Document type">
               <select

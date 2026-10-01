@@ -5,14 +5,10 @@ import { Field, Modal, Notice, inputClass } from "../components/Modal.jsx";
 import { api } from "../lib/api.js";
 import { ASSET_TYPES, DEPLOYMENT_STATUSES, OPERATIONAL_STATUSES } from "../lib/constants.js";
 import { Badge } from "../lib/format.jsx";
-
-// The deployment location is the site you pick, so each custody type points at
-// the directory it belongs to instead of asking for the name a second time.
-const SITE_FIELD = {
-  "Customer / LE Agency": { key: "agency_id", label: "Customer / Agency", directory: "agencies" },
-  "In Transit": { key: "warehouse_id", label: "Destination warehouse", directory: "warehouses" },
-  "Warehouse Depot": { key: "warehouse_id", label: "Warehouse", directory: "warehouses" },
-};
+// The deployment location is the site you pick, so the form never asks for the
+// name a second time. lib/sites.jsx owns the directories each custody type
+// can draw from.
+import { SITE_FIELD, SiteSelect, hasSite, needsSite } from "../lib/sites.jsx";
 
 export default function Deployments() {
   const [rows, setRows] = useState([]);
@@ -424,9 +420,10 @@ export default function Deployments() {
               e.preventDefault();
               setBusy(true);
               try {
-                const site = SITE_FIELD[form.custody_type];
-                if (site && !form[site.key]) {
-                  throw new Error(`Select a ${site.label.toLowerCase()} for this deployment.`);
+                if (!hasSite(form.custody_type, form)) {
+                  throw new Error(
+                    `Select a ${SITE_FIELD[form.custody_type].label.toLowerCase()} for this deployment.`
+                  );
                 }
                 await api(`/assets/${form.asset_id}/deployments`, {
                   method: "POST",
@@ -480,28 +477,16 @@ export default function Deployments() {
                 <option value="Warehouse Depot">Warehouse Depot</option>
               </select>
             </Field>
-            {SITE_FIELD[form.custody_type] ? (
+            {needsSite(form.custody_type) ? (
               <Field label={SITE_FIELD[form.custody_type].label}>
-                <select
-                  required
+                <SiteSelect
+                  custodyType={form.custody_type}
+                  form={form}
+                  warehouses={warehouses}
+                  agencies={agencies}
                   className={inputClass}
-                  value={form[SITE_FIELD[form.custody_type].key] || ""}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      agency_id: "",
-                      warehouse_id: "",
-                      [SITE_FIELD[form.custody_type].key]: e.target.value,
-                    })
-                  }
-                >
-                  <option value="">Select {SITE_FIELD[form.custody_type].label.toLowerCase()}</option>
-                  {(SITE_FIELD[form.custody_type].directory === "agencies" ? agencies : warehouses).map((row) => (
-                    <option key={row.id} value={row.id}>
-                      {row.name}{row.site_name ? ` - ${row.site_name}` : ""}
-                    </option>
-                  ))}
-                </select>
+                  onSelect={(patch) => setForm({ ...form, ...patch })}
+                />
                 <p className="mt-1 text-xs text-slate-500">
                   The deployment location and map pin come from this record.
                 </p>
@@ -520,12 +505,12 @@ export default function Deployments() {
                 </Field>
                 <Field label="Tracking Code">
                   <input
-                    required
                     className={inputClass}
                     placeholder="1Z999AA10123456784"
                     value={form.tracking_code || ""}
                     onChange={(e) => setForm({ ...form, tracking_code: e.target.value })}
                   />
+                  <p className="mt-1 text-xs text-slate-500">Optional — add it once the carrier issues one.</p>
                 </Field>
               </>
             )}
@@ -807,11 +792,11 @@ function EndDeploymentModal({ form, setForm, warehouses, agencies, busy, onClose
             </Field>
             <Field label="Tracking Code">
               <input
-                required
                 className={inputClass}
                 value={form.tracking_code || ""}
                 onChange={(e) => setForm({ ...form, tracking_code: e.target.value })}
               />
+              <p className="mt-1 text-xs text-slate-500">Optional — add it once the carrier issues one.</p>
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Departure Date">

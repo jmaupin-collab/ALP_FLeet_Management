@@ -177,7 +177,8 @@ def test_warehouse_asset_uses_warehouse_coordinates(client, org_users):
     assert pytest.approx(pin["longitude"], abs=1e-4) == -112.0740
 
 
-def test_in_transit_keeps_last_known_warehouse_pin(client, org_users):
+def test_in_transit_drops_off_the_map_without_a_tracker(client, org_users):
+    """A unit on a truck is not at the yard it left, so it gets no pin at all."""
     asset = org_users["asset"]
     headers = login(client)
     started = client.post(
@@ -193,11 +194,43 @@ def test_in_transit_keeps_last_known_warehouse_pin(client, org_users):
     assert started.status_code == 200, started.text
     assert started.json()["operational_status"] == "in_transit"
 
+    mapped = client.get("/map/assets", headers=headers).json()
+    assert [row for row in mapped if row["id"] == str(asset.id)] == []
+
+
+def test_in_transit_with_live_telematics_still_shows_where_it_is(client, org_users, db_session):
+    """A real tracker knows where the truck is, so that pin is honest and stays."""
+    asset = org_users["asset"]
+    headers = login(client)
+    started = client.post(
+        f"/assets/{asset.id}/deployments",
+        headers=headers,
+        json={
+            "location": "To agency yard",
+            "custody_type": "In Transit",
+            "carrier_name": "FedEx",
+            "tracking_code": "1Z999",
+        },
+    )
+    assert started.status_code == 200, started.text
+    assert started.json()["operational_status"] == "in_transit"
+
+    db_session.add(
+        GPSLocation(
+            asset_id=asset.id,
+            latitude=Decimal("35.1983000"),
+            longitude=Decimal("-111.6513000"),
+            location_timestamp=datetime.now(UTC) - timedelta(minutes=5),
+            telematics_provider="Geotab",
+        )
+    )
+    db_session.commit()
+
     pin = map_pin(client, headers, asset.id)
-    assert pin["operational_status"] == "in_transit"
     assert pin["location_source"] == "in_transit"
-    assert pytest.approx(pin["latitude"], abs=1e-4) == 33.4484
-    assert pytest.approx(pin["longitude"], abs=1e-4) == -112.0740
+    # Flagstaff, partway along the route: neither the origin nor the destination.
+    assert pytest.approx(pin["latitude"], abs=1e-4) == 35.1983
+    assert pytest.approx(pin["longitude"], abs=1e-4) == -111.6513
 
 
 def test_location_name_deploy_ignores_synthetic_gps_and_uses_agency(client, org_users, db_session):
@@ -522,4 +555,142 @@ def test_a_location_string_alone_still_works_for_a_site_not_in_the_directory(cli
 
     assert started.status_code == 200, started.text
     assert started.json()["current_location"] == "Pop-up site, Mesa AZ"
+
+
+def test_an_in_transit_shipment_can_be_addressed_to_an_agency(client, org_users):
+    """A unit ships out to a customer as often as it ships back to a depot."""
+    headers = login(client)
+    agency = org_users["agency"]
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "agency_id": str(agency.id),
+            "carrier_name": "FedEx",
+            "tracking_code": "1Z999",
+        },
+    )
+
+    assert started.status_code == 200, started.text
+    body = started.json()
+    assert body["operational_status"] == "in_transit"
+    assert body["agency_id"] == str(agency.id)
+    assert body["warehouse_id"] is None
+    # The destination names the location, same as it does for a warehouse leg.
+    assert body["current_location"] == agency.name
+
+
+def test_an_in_transit_shipment_to_an_agency_is_not_pinned_at_the_destination(client, org_users):
+    """Addressed to an agency is not the same as arrived there."""
+    headers = login(client)
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "agency_id": str(org_users["agency"].id),
+            "carrier_name": "FedEx",
+            "tracking_code": "1Z999",
+        },
+    )
+    assert started.status_code == 200, started.text
+
+    mapped = client.get("/map/assets", headers=headers).json()
+    assert [row for row in mapped if row["id"] == str(org_users["asset"].id)] == []
+    # The asset record still knows where it is headed; only the pin is withheld.
+    assert started.json()["operational_status"] == "in_transit"
+
+
+def test_an_in_transit_shipment_needs_no_tracking_code(client, org_users):
+    """Carriers often issue the code after pickup, and in-house moves have none."""
+    headers = login(client)
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "warehouse_id": str(org_users["warehouse"].id),
+            "carrier_name": "Driven in-house",
+        },
+    )
+
+    assert started.status_code == 200, started.text
+    body = started.json()
+    assert body["operational_status"] == "in_transit"
+    assert body["carrier_name"] == "Driven in-house"
+    assert body["tracking_code"] is None
+
+
+def test_an_in_transit_shipment_still_needs_a_carrier(client, org_users):
+    headers = login(client)
+
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "warehouse_id": str(org_users["warehouse"].id),
+            "tracking_code": "1Z999",
+        },
+    )
+
+    assert started.status_code == 422
+    assert "carrier" in started.json()["detail"].lower()
+
+
+def test_a_tracking_code_added_later_is_recorded(client, org_users):
+    headers = login(client)
+    asset_id = org_users["asset"].id
+    client.post(
+        f"/assets/{asset_id}/deployments",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "warehouse_id": str(org_users["warehouse"].id),
+            "carrier_name": "FedEx",
+        },
+    )
+
+    updated = client.post(
+        f"/assets/{asset_id}/custody",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "location": "En route",
+            "carrier_name": "FedEx",
+            "tracking_code": "1Z999",
+        },
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["tracking_code"] == "1Z999"
+
+
+def test_an_in_transit_shipment_to_an_agency_in_another_org_is_refused(client, org_users, db_session):
+    from app.models import Agency, Organization
+
+    other = Organization(name="Other Co", slug="other-co", org_type="internal")
+    db_session.add(other)
+    db_session.flush()
+    outsider = Agency(organization_id=other.id, name="Outside PD", agency_type="Law Enforcement")
+    db_session.add(outsider)
+    db_session.commit()
+
+    headers = login(client)
+    started = client.post(
+        f"/assets/{org_users['asset'].id}/deployments",
+        headers=headers,
+        json={
+            "custody_type": "In Transit",
+            "agency_id": str(outsider.id),
+            "carrier_name": "FedEx",
+            "tracking_code": "1Z999",
+        },
+    )
+
+    assert started.status_code == 404
 

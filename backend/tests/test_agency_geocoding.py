@@ -53,6 +53,8 @@ def geocoder(monkeypatch):
         return table.get((address or "").strip())
 
     monkeypatch.setattr("app.geocoding.geocode_address", fake_geocode)
+    # Stubbed too, so a miss stays a miss instead of reaching out for a city pin.
+    monkeypatch.setattr("app.geocoding.geocode_locality", lambda address: None)
     return calls
 
 

@@ -1,5 +1,6 @@
 import { NavLink, Outlet, useNavigate } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
+import NotificationBell from "./NotificationBell.jsx";
 import { api, clearToken } from "../lib/api.js";
 import { clearOrder, loadOrder, moveItem, orderTabs, saveOrder } from "../lib/navOrder.js";
 import { useMe, clearMeCache } from "../lib/useMe.js";
@@ -10,6 +11,7 @@ import { ADMINS, ALL_INTERNAL, EVERYONE, MANAGERS, OPERATORS, VIEWERS, hasRole, 
 const tabs = [
   { to: "/", label: "Dashboard", end: true, roles: VIEWERS },
   { to: "/attention", label: "Attention", roles: OPERATORS },
+  { to: "/requests", label: "Request Center", roles: MANAGERS },
   { to: "/assets", label: "Assets", roles: VIEWERS },
   { to: "/deployments", label: "Deployments", roles: VIEWERS },
   { to: "/map", label: "Map", roles: EVERYONE },
@@ -206,9 +208,13 @@ export default function Layout() {
             <p className="text-xs font-medium uppercase tracking-wider text-slate-500">Operations control</p>
             <p className="text-sm text-slate-700">Live records from the fleet API · archive instead of erasing history</p>
           </div>
-          <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 ring-1 ring-inset ring-emerald-200">
-            Systems nominal
-          </span>
+          <div className="flex items-center gap-3">
+            {/* Only the roles the backend notifies get a bell to look at. */}
+            {hasRole(me, MANAGERS) ? <NotificationBell /> : null}
+            <span className="rounded-full bg-emerald-50 px-3 py-1 text-xs font-medium text-emerald-800 ring-1 ring-inset ring-emerald-200">
+              Systems nominal
+            </span>
+          </div>
         </header>
         <main className="flex-1 p-8">
           <Outlet />

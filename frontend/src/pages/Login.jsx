@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router-dom";
 import { API_BASE, setToken } from "../lib/api.js";
 import { clearMeCache } from "../lib/useMe.js";
 import { canonicalRole } from "../lib/roles.js";
@@ -70,6 +71,13 @@ export default function Login() {
         >
           {loading ? "Signing in…" : "Sign in"}
         </button>
+        <p className="mt-6 border-t border-slate-800 pt-4 text-center text-xs text-slate-400">
+          Need a trailer?{" "}
+          <Link to="/request-alpr" className="font-medium text-teal-400 hover:underline">
+            Request an ALPR trailer
+          </Link>{" "}
+          — no account required.
+        </p>
       </form>
     </div>
   );

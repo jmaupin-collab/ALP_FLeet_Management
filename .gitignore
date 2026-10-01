@@ -21,6 +21,9 @@ backend/uploads/
 frontend/node_modules/
 frontend/dist/
 
+# Dev server output captured when starting Vite in the background
+*.log
+
 # Env
 .env
 .env.local

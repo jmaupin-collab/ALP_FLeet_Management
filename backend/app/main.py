@@ -33,6 +33,8 @@ from app.deps import (
 )
 from app.exports import analytics_csv
 from app.models import (
+    ALL_ASSET_TYPES_SCOPE,
+    OPERATIONAL_ASSET_TYPE,
     Agency,
     Asset,
     AssetAuthorization,
@@ -157,6 +159,9 @@ from app.inspection_photos import photo_response
 from app.inventory import router as inventory_router
 from app.location import get_asset_location
 from app.seed_quick import seed_quick
+from app.notifications import router as notifications_router
+from app.requests_api import public_router as public_requests_router, router as requests_router
+from app.telematics import router as telematics_router
 from app.utilization import router as utilization_router
 from app.services import (
     apply_custody,
@@ -217,6 +222,14 @@ app.include_router(documents_router)
 app.include_router(utilization_router)
 app.include_router(inventory_router)
 app.include_router(attention_router)
+app.include_router(notifications_router)
+app.include_router(requests_router)
+# Machine-to-machine: authenticated by a shared key rather than a user session,
+# because the caller is a tracker or a poller.
+app.include_router(telematics_router)
+# Unauthenticated intake. Kept under /public so the boundary is visible in the
+# route table and easy to reason about at the edge (WAF, proxy, rate limits).
+app.include_router(public_requests_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -263,10 +276,31 @@ def me(current_user: User = Depends(get_current_user)) -> User:
 
 @app.get("/dashboard/kpis", response_model=DashboardKpis)
 def get_dashboard_kpis(
+    asset_type: str | None = Query(
+        default=None,
+        description=(
+            "Scope the readiness counts to one asset type. Omit for ALPR Trailers, "
+            f"or pass '{ALL_ASSET_TYPES_SCOPE}' to total every type."
+        ),
+    ),
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> DashboardKpis:
-    return dashboard_kpis(db, current_user.organization_id, current_user)
+    # Absent and "all" are different requests, so the param cannot just be an
+    # AssetType with a default: omitting it has to keep meaning ALPR Trailer.
+    if asset_type is None:
+        scope = OPERATIONAL_ASSET_TYPE
+    elif asset_type.strip().lower() == ALL_ASSET_TYPES_SCOPE.lower():
+        scope = None
+    else:
+        try:
+            scope = AssetType(asset_type)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown asset_type {asset_type!r}.",
+            )
+    return dashboard_kpis(db, current_user.organization_id, current_user, scope)
 
 
 @app.get("/assets", response_model=list[AssetOut])

@@ -535,7 +535,8 @@ def test_repair_cost_replacement_warning_still_works(client, org_users, db_sessi
     assert float(body["total_repair_cost"]) == 1100
 
 
-def test_in_transit_updates_map_and_dashboard_counts(client, org_users, db_session):
+def test_in_transit_counts_on_the_dashboard_but_leaves_the_map(client, org_users, db_session):
+    """Still tracked and still counted, just no longer claimed to be anywhere."""
     asset = org_users["asset"]
     warehouse = Warehouse(
         organization_id=asset.organization_id,
@@ -568,12 +569,9 @@ def test_in_transit_updates_map_and_dashboard_counts(client, org_users, db_sessi
     assert after["available"] == before["available"] - 1
     assert after["in_transit"] == before.get("in_transit", 0) + 1
 
+    # It left Transit Yard, so it must not still be drawn sitting there.
     mapped = client.get("/map/assets", headers=headers).json()
-    pin = next(row for row in mapped if row["id"] == str(asset.id))
-    assert pin["operational_status"] == "in_transit"
-    assert pin["location_source"] == "in_transit"
-    assert pin["latitude"]
-    assert pin["longitude"]
+    assert [row for row in mapped if row["id"] == str(asset.id)] == []
 
 
 def test_end_workflow_in_transit_does_not_reset_available(client, org_users, db_session):

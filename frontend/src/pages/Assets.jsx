@@ -7,6 +7,10 @@ import { api } from "../lib/api.js";
 import { ASSET_TYPES, CUSTODY_TYPES } from "../lib/constants.js";
 import { Badge, money } from "../lib/format.jsx";
 import { ADMINS, hasRole } from "../lib/roles.js";
+// A new asset's location comes from the site it sits at, so the picker follows
+// the custody type instead of asking for a typed location. lib/sites.jsx owns
+// which directories each custody type can draw from.
+import { SITE_FIELD, SiteSelect, hasSite, siteGroups } from "../lib/sites.jsx";
 
 const emptyForm = {
   vin: "",
@@ -19,14 +23,6 @@ const emptyForm = {
   current_custody_type: "Warehouse Depot",
   warehouse_id: "",
   agency_id: "",
-};
-
-// A new asset's location comes from the site it sits at, so the picker follows
-// the custody type instead of asking for a typed location.
-const SITE_FIELD = {
-  "Warehouse Depot": { key: "warehouse_id", label: "Warehouse", directory: "warehouses" },
-  "In Transit": { key: "warehouse_id", label: "Destination warehouse", directory: "warehouses" },
-  "Customer / LE Agency": { key: "agency_id", label: "Agency", directory: "agencies" },
 };
 
 export default function Assets() {
@@ -78,14 +74,14 @@ export default function Assets() {
   // Check if current user is an admin
   const isAdmin = hasRole(currentUser, ADMINS);
 
-  const site = SITE_FIELD[form.current_custody_type] || SITE_FIELD["Warehouse Depot"];
-  const siteOptions = site.directory === "agencies" ? agencies : warehouses;
+  const custodyType = SITE_FIELD[form.current_custody_type] ? form.current_custody_type : "Warehouse Depot";
+  const site = SITE_FIELD[custodyType];
+  const hasSiteOptions = siteGroups(custodyType, { warehouses, agencies }).length > 0;
 
-  function selectSite(event) {
-    const id = event.target.value;
-    const name = event.target.selectedOptions[0]?.text || "";
-    // Only one link applies at a time, so clear both before setting the live one.
-    setForm({ ...form, warehouse_id: "", agency_id: "", [site.key]: id, current_location: id ? name : "" });
+  function selectSite(patch, name) {
+    // The picker clears the directory that was not chosen, so spreading the
+    // patch is enough to keep exactly one link live.
+    setForm({ ...form, ...patch, current_location: patch.warehouse_id || patch.agency_id ? name : "" });
   }
 
   async function saveAsset(event) {
@@ -94,7 +90,7 @@ export default function Assets() {
       setError("Asset ID, make/model, and purchase cost are required.");
       return;
     }
-    if (modal === "create" && !form[site.key]) {
+    if (modal === "create" && !hasSite(custodyType, form)) {
       setError(`Select a ${site.label.toLowerCase()} so the asset has a location.`);
       return;
     }
@@ -337,7 +333,7 @@ export default function Assets() {
         <Modal title={modal === "create" ? "Add New Asset" : "Edit Asset"} onClose={() => setModal(null)}>
           <form onSubmit={saveAsset} className="space-y-3">
             <Field label="Asset ID">
-              <input required minLength={4} maxLength={32} className={inputClass} value={form.vin} onChange={(e) => setForm({ ...form, vin: e.target.value })} />
+              <input required minLength={3} maxLength={32} className={inputClass} value={form.vin} onChange={(e) => setForm({ ...form, vin: e.target.value })} />
             </Field>
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
@@ -398,19 +394,19 @@ export default function Assets() {
                   </select>
                 </Field>
                 <Field label={site.label}>
-                  <select required className={inputClass} value={form[site.key]} onChange={selectSite}>
-                    <option value="">{`-- Select a ${site.label.toLowerCase()} --`}</option>
-                    {siteOptions.map((option) => (
-                      <option key={option.id} value={option.id}>
-                        {option.name}
-                      </option>
-                    ))}
-                  </select>
-                  {siteOptions.length === 0 ? (
+                  <SiteSelect
+                    custodyType={custodyType}
+                    form={form}
+                    warehouses={warehouses}
+                    agencies={agencies}
+                    className={inputClass}
+                    onSelect={selectSite}
+                  />
+                  {hasSiteOptions ? null : (
                     <p className="mt-1 text-xs text-slate-600">
-                      No {site.directory} yet. Add one under {site.directory === "agencies" ? "Agencies" : "Warehouses"} first.
+                      Nothing to pick yet. Add a warehouse or agency under Directory first.
                     </p>
-                  ) : null}
+                  )}
                 </Field>
               </>
             ) : null}

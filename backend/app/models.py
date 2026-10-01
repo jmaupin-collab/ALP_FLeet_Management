@@ -26,6 +26,18 @@ class AssetType(str, enum.Enum):
     ALPR_TRAILER = "ALPR Trailer"
     SEMI_TRUCK = "Semi Truck"
     FLEET_VEHICLE = "Fleet Vehicle"
+    ATP = "ATP"
+    SKY_CARRIER = "Sky Carrier"
+
+
+# Readiness and utilization are ALPR Trailer concepts. Every other type is
+# support equipment: tracked and maintained, but never "available to deploy",
+# so they stay out of those rollups.
+OPERATIONAL_ASSET_TYPE = AssetType.ALPR_TRAILER
+
+# What the dashboard calls the unscoped view. Not an AssetType, so it cannot be
+# confused with one when it comes back as asset_type_scope.
+ALL_ASSET_TYPES_SCOPE = "All asset types"
 
 
 class UserRole(str, enum.Enum):
@@ -224,6 +236,9 @@ class Warehouse(Base):
     country: Mapped[str] = mapped_column(String(64), default="USA", nullable=False)
     latitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7), nullable=True)
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7), nullable=True)
+    # Null means "use the configured default". Set it per site for a yard that is
+    # much larger or smaller than the norm.
+    geofence_radius_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_archived: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -252,6 +267,7 @@ class Agency(Base):
     country: Mapped[str] = mapped_column(String(64), default="USA", nullable=False)
     latitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7), nullable=True)
     longitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7), nullable=True)
+    geofence_radius_m: Mapped[int | None] = mapped_column(Integer, nullable=True)
     is_archived: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -270,6 +286,11 @@ class Vendor(Base):
     )
     name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     specialty: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Who to call at the vendor. Optional: a shop can be on file before anyone
+    # has a name for it, and stored as free text because extensions, mobile
+    # numbers and international formats all have to round-trip unchanged.
+    contact_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    contact_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
     is_archived: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)
@@ -341,6 +362,83 @@ class GPSLocation(Base):
     asset: Mapped[Asset] = relationship(back_populates="gps_locations")
 
 
+class GeofenceZoneKind(str, enum.Enum):
+    WAREHOUSE = "warehouse"
+    AGENCY = "agency"
+
+
+class GeofenceEventType(str, enum.Enum):
+    ENTERED = "entered"
+    EXITED = "exited"
+
+
+class AssetZoneState(Base):
+    """Which geofence an asset is currently inside, one row per asset.
+
+    Transitions are what matter, and a position report on its own cannot tell
+    you whether a unit just arrived or has been parked there all week. This row
+    is the "before" that each new fix is compared against.
+    """
+
+    __tablename__ = "asset_zone_states"
+
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), primary_key=True
+    )
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Null zone means "outside every known site", which is a real state: it is
+    # what a unit in transit on the highway looks like.
+    zone_kind: Mapped[GeofenceZoneKind | None] = mapped_column(
+        _enum(GeofenceZoneKind, "geofence_zone_kind"), nullable=True
+    )
+    zone_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    zone_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    entered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_fix_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    asset: Mapped[Asset] = relationship()
+
+
+class GeofenceEvent(Base):
+    """Append-only record of every arrival and departure.
+
+    Kept even when an event changes nothing, so "when did this unit leave?" has
+    an answer that does not depend on anyone having seen the notification.
+    """
+
+    __tablename__ = "geofence_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[GeofenceEventType] = mapped_column(
+        _enum(GeofenceEventType, "geofence_event_type"), nullable=False
+    )
+    zone_kind: Mapped[GeofenceZoneKind] = mapped_column(_enum(GeofenceZoneKind, "geofence_zone_kind"), nullable=False)
+    zone_id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    zone_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    latitude: Mapped[Decimal] = mapped_column(Numeric(10, 7), nullable=False)
+    longitude: Mapped[Decimal] = mapped_column(Numeric(10, 7), nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    # True when nothing on the asset explained the move, which is the case worth
+    # waking someone up for.
+    was_unexpected: Mapped[bool] = mapped_column(default=False, nullable=False)
+    # What the arrival did to the asset, if anything, in plain words.
+    action_taken: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    asset: Mapped[Asset] = relationship()
+
+
 class Asset(Base):
     """Current snapshot of an asset. Location/status history lives in child tables."""
 
@@ -371,6 +469,10 @@ class Asset(Base):
     # GPS/Telematics fields (provider-neutral)
     telematics_provider: Mapped[str | None] = mapped_column(String(64), nullable=True)
     telematics_device_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Opt-in, per asset. A provider account holds far more vehicles than this
+    # fleet cares about, so nothing is tracked until somebody says so: positions
+    # for an asset that is not enrolled are dropped rather than stored.
+    telematics_tracking_enabled: Mapped[bool] = mapped_column(default=False, nullable=False)
     created_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     updated_by_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
@@ -998,6 +1100,219 @@ class AttentionItem(Base):
     dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     dismissed_by_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+
+class AlprRequestType(str, enum.Enum):
+    DEPLOY = "deploy"
+    PICKUP = "pickup"
+
+
+class AlprRequestStatus(str, enum.Enum):
+    NEW = "New"
+    UNDER_REVIEW = "Under Review"
+    APPROVED = "Approved"
+    SCHEDULED = "Scheduled"
+    IN_PROGRESS = "In Progress"
+    COMPLETED = "Completed"
+    REJECTED = "Rejected"
+    CANCELLED = "Cancelled"
+
+
+class AlprRequest(Base):
+    """A deployment or pickup asked for from the public intake form.
+
+    This is an intake record, never a fleet action. Submitting one assigns no
+    asset, opens no deployment, and moves nothing on the map; a Fleet Admin or
+    Fleet Manager has to review it and then run the ordinary lifecycle workflow.
+    Everything the public supplies is untrusted free text, which is why the
+    agency is stored by name as typed and only linked to a real Agency row once
+    staff confirm the match.
+    """
+
+    __tablename__ = "alpr_requests"
+    __table_args__ = (
+        Index("ix_alpr_requests_org_status", "organization_id", "status"),
+        Index("ix_alpr_requests_created", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Short human-facing handle so a requester can be given something to quote
+    # back without ever exposing an internal UUID.
+    reference: Mapped[str] = mapped_column(String(16), unique=True, nullable=False, index=True)
+    request_type: Mapped[AlprRequestType] = mapped_column(
+        _enum(AlprRequestType, "alpr_request_type"), nullable=False, index=True
+    )
+    status: Mapped[AlprRequestStatus] = mapped_column(
+        _enum(AlprRequestStatus, "alpr_request_status"),
+        default=AlprRequestStatus.NEW,
+        server_default=AlprRequestStatus.NEW.value,
+        nullable=False,
+        index=True,
+    )
+
+    agency_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Set by staff during review when the typed name is matched to a real record.
+    agency_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("agencies.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    requester_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    requester_email: Mapped[str] = mapped_column(String(320), nullable=False, index=True)
+    requester_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    requested_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    address: Mapped[str] = mapped_column(String(512), nullable=False)
+    # Null when geocoding failed. The typed address is always kept regardless.
+    latitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7), nullable=True)
+    longitude: Mapped[Decimal | None] = mapped_column(Numeric(10, 7), nullable=True)
+    quantity: Mapped[int] = mapped_column(Integer, default=1, server_default="1", nullable=False)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # Audit metadata captured at submission. Kept for abuse investigation only.
+    source_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    captcha_verified: Mapped[bool] = mapped_column(default=False, server_default="0", nullable=False)
+
+    reviewed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    review_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scheduled_date: Mapped[datetime | None] = mapped_column(Date, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    completion_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
+    )
+
+    assets: Mapped[list[AlprRequestAsset]] = relationship(
+        back_populates="request", cascade="all, delete-orphan"
+    )
+    events: Mapped[list[AlprRequestEvent]] = relationship(
+        back_populates="request",
+        cascade="all, delete-orphan",
+        order_by="AlprRequestEvent.created_at.asc()",
+    )
+
+
+class AlprRequestAsset(Base):
+    """Trailers staff picked for a request. One row per unit."""
+
+    __tablename__ = "alpr_request_assets"
+    __table_args__ = (
+        UniqueConstraint("request_id", "asset_id", name="uq_alpr_request_asset"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("alpr_requests.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    asset_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("assets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Flipped only once the real deployment/return workflow has run for this unit.
+    fulfilled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    request: Mapped[AlprRequest] = relationship(back_populates="assets")
+    asset: Mapped[Asset] = relationship()
+
+
+class AlprRequestEvent(Base):
+    """Append-only history for one request.
+
+    Never updated or deleted, so the trail of who changed what survives even
+    when the request itself is edited.
+    """
+
+    __tablename__ = "alpr_request_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("alpr_requests.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    from_status: Mapped[AlprRequestStatus | None] = mapped_column(
+        _enum(AlprRequestStatus, "alpr_event_from_status"), nullable=True
+    )
+    to_status: Mapped[AlprRequestStatus | None] = mapped_column(
+        _enum(AlprRequestStatus, "alpr_event_to_status"), nullable=True
+    )
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Null for the submission event, which by definition has no logged-in actor.
+    actor_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+    request: Mapped[AlprRequest] = relationship(back_populates="events")
+
+
+class Notification(Base):
+    """A delivered in-app notification, addressed to one user.
+
+    Distinct from AttentionItem, which is a recomputed standing condition. A
+    notification records that something happened once, so it is written per
+    recipient and read state belongs to that recipient alone.
+    """
+
+    __tablename__ = "notifications"
+    __table_args__ = (
+        Index("ix_notifications_user_read", "user_id", "read_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    kind: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    link_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    read_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False, index=True
+    )
+
+
+class PushSubscription(Base):
+    """A browser Web Push endpoint a user opted into.
+
+    The endpoint is unique so re-subscribing the same browser updates rather
+    than duplicating, which is what stops one person getting four copies.
+    """
+
+    __tablename__ = "push_subscriptions"
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    endpoint: Mapped[str] = mapped_column(String(512), unique=True, nullable=False)
+    p256dh: Mapped[str] = mapped_column(String(255), nullable=False)
+    auth: Mapped[str] = mapped_column(String(255), nullable=False)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 
 

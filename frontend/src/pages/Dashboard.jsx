@@ -4,7 +4,11 @@ import { Bar, BarChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxi
 import { DataTable } from "../components/DataTable";
 import { Notice } from "../components/Modal.jsx";
 import { api, displayApiError } from "../lib/api.js";
+import { ASSET_TYPES } from "../lib/constants.js";
 import { Badge, hours, money } from "../lib/format.jsx";
+
+// Matches the backend sentinel; anything else is a literal AssetType value.
+const ALL_ASSET_TYPES = "All asset types";
 
 const emptyKpis = {
   fleet_size: 0,
@@ -28,33 +32,42 @@ export default function Dashboard() {
   const [attention, setAttention] = useState({ critical: 0, warning: 0, info: 0, total: 0 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-
-  const loadData = () => {
-    Promise.all([
-      api("/dashboard/kpis"),
-      api("/analytics"),
-      api("/attention/summary").catch(() => null),
-      api("/analytics/utilization").catch(() => []),
-    ])
-      .then(([kpiData, analytics, counts, util]) => {
-        setKpis(kpiData);
-        setFailures(analytics.failures?.slice(0, 6) || []);
-        if (counts) setAttention(counts);
-        setUtilization(util || []);
-        setError("");
-      })
-      .catch((err) => setError(displayApiError(err)))
-      .finally(() => setLoading(false));
-  };
+  // Readiness is scoped to one asset type at a time. ALPR Trailers are the
+  // default because that is the fleet these states were designed around.
+  const [scope, setScope] = useState("ALPR Trailer");
+  // Utilization has its own filter rather than following the readiness scope:
+  // readiness is an ALPR-shaped question, utilization applies to anything that
+  // gets used, and the two are usually looked at for different reasons.
+  const [utilizationType, setUtilizationType] = useState("");
 
   useEffect(() => {
+    const utilizationQuery = utilizationType
+      ? `?asset_type=${encodeURIComponent(utilizationType)}`
+      : "";
+    const loadData = () => {
+      Promise.all([
+        api(`/dashboard/kpis?asset_type=${encodeURIComponent(scope)}`),
+        api("/analytics"),
+        api("/attention/summary").catch(() => null),
+        api(`/analytics/utilization${utilizationQuery}`).catch(() => []),
+      ])
+        .then(([kpiData, analytics, counts, util]) => {
+          setKpis(kpiData);
+          setFailures(analytics.failures?.slice(0, 6) || []);
+          if (counts) setAttention(counts);
+          setUtilization(util || []);
+          setError("");
+        })
+        .catch((err) => setError(displayApiError(err)))
+        .finally(() => setLoading(false));
+    };
+
     loadData();
-    
     // Auto-refresh every 30 seconds
     const interval = setInterval(loadData, 30000);
-    
+
     return () => clearInterval(interval);
-  }, []);
+  }, [scope, utilizationType]);
 
   const cards = [
     { label: "Fleet size", value: kpis.fleet_size },
@@ -68,16 +81,36 @@ export default function Dashboard() {
     { label: "Recorded WO downtime", value: hours(kpis.downtime_hours_ytd) },
   ];
 
-  const scope = kpis.asset_type_scope || "ALPR Trailer";
+  // Trust the scope the server answered with, not the one just requested, so
+  // the wording never gets ahead of the numbers on screen.
+  const activeScope = kpis.asset_type_scope || scope;
+  const allTypes = activeScope === ALL_ASSET_TYPES;
   const nonAlpr = kpis.non_alpr_inventory || [];
 
   return (
     <div className="space-y-8">
-      <div>
-        <h2 className="text-2xl font-semibold text-slate-900">Dashboard</h2>
-        <p className="mt-1 text-sm text-slate-600">
-          Readiness counts cover {scope}s only. Other asset types are listed under Other fleet inventory below.
-        </p>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h2 className="text-2xl font-semibold text-slate-900">Dashboard</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            {allTypes
+              ? "Readiness counts cover every asset type together."
+              : `Readiness counts cover ${activeScope}s only. Other asset types are listed under Other fleet inventory below.`}
+          </p>
+        </div>
+        <label className="text-sm text-slate-700">
+          <span className="mr-2 font-medium">Readiness for</span>
+          <select
+            className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+            value={scope}
+            onChange={(e) => setScope(e.target.value)}
+          >
+            {ASSET_TYPES.map((type) => (
+              <option key={type}>{type}</option>
+            ))}
+            <option>{ALL_ASSET_TYPES}</option>
+          </select>
+        </label>
       </div>
       {loading ? <p className="text-sm text-slate-600">Loading dashboard…</p> : null}
       <Notice error={error} />
@@ -119,14 +152,22 @@ export default function Dashboard() {
         </div>
       ) : null}
       <div>
-        <h3 className="mb-3 text-sm font-semibold text-slate-800">{scope} metrics by asset type</h3>
+        <div className="mb-3">
+          <h3 className="text-sm font-semibold text-slate-800">Readiness by asset type</h3>
+          <p className="mt-1 text-xs text-slate-500">
+            The same states as the cards above, split by type. Each column adds up to its card.
+          </p>
+        </div>
         <DataTable
           columns={[
             { key: "asset_type", header: "Asset type", render: (r) => <Badge value={r.asset_type} tone="type" /> },
             { key: "total_assets", header: "Units" },
-            { key: "deployed", header: "Deployed / in transit" },
+            { key: "deployed", header: "Deployed" },
+            { key: "available", header: "Available" },
+            { key: "in_transit", header: "In transit" },
             { key: "in_maintenance", header: "In maintenance" },
-            { key: "idle_or_stored", header: "Idle / stored" },
+            { key: "out_of_service", header: "Out of service" },
+            { key: "retired", header: "Retired" },
             { key: "total_purchase_cost", header: "Purchase cost", render: (r) => money(r.total_purchase_cost) },
             { key: "downtime_hours_ytd", header: "Recorded WO downtime", render: (r) => hours(r.downtime_hours_ytd) },
           ]}
@@ -134,12 +175,12 @@ export default function Dashboard() {
           empty="No KPI rows yet."
         />
       </div>
-      <div>
+      <div className={allTypes ? "hidden" : undefined}>
         <div className="mb-3">
           <h3 className="text-sm font-semibold text-slate-800">Other fleet inventory</h3>
           <p className="mt-1 text-xs text-slate-500">
-            Semi Trucks and Fleet Vehicles are tracked as inventory and are deliberately left out of the {scope}
-            {" "}readiness counts above.
+            Tracked as inventory and deliberately left out of the {activeScope} readiness counts above.
+            Switch the filter to see readiness for one of these instead.
           </p>
         </div>
         <DataTable
@@ -160,13 +201,29 @@ export default function Dashboard() {
           <div>
             <h3 className="text-sm font-semibold text-slate-800">Asset utilization (lifecycle history)</h3>
             <p className="mt-1 text-xs text-slate-500">
+              {utilizationType ? `${utilizationType} only` : "Whole fleet"} — utilization compares deployed time against
+              available time, and is filtered separately from the readiness scope above.
               Utilization % and High Downtime come from 90-day lifecycle segments (eligible ≥ 7 days, downtime ≥ 20% and ≥ 3 days).
               The KPI card is lifetime recorded work-order downtime hours — a different metric.
             </p>
           </div>
-          <Link to="/analytics" className="text-xs font-semibold text-teal-800 hover:underline">
-            Open analytics
-          </Link>
+          <div className="flex items-center gap-3">
+            <select
+              className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm"
+              value={utilizationType}
+              onChange={(e) => setUtilizationType(e.target.value)}
+            >
+              <option value="">All asset types</option>
+              {ASSET_TYPES.map((type) => (
+                <option key={type} value={type}>
+                  {type}
+                </option>
+              ))}
+            </select>
+            <Link to="/analytics" className="text-xs font-semibold text-teal-800 hover:underline">
+              Open analytics
+            </Link>
+          </div>
         </div>
         <DataTable
           columns={[
@@ -179,6 +236,7 @@ export default function Dashboard() {
                 </Link>
               ),
             },
+            { key: "asset_type", header: "Type", render: (r) => <Badge value={r.asset_type} tone="type" /> },
             { key: "utilization_30d", header: "30-day", render: (r) => `${Number(r.utilization_30d || 0).toFixed(1)}%` },
             { key: "utilization_90d", header: "90-day", render: (r) => `${Number(r.utilization_90d || 0).toFixed(1)}%` },
             { key: "utilization_365d", header: "365-day", render: (r) => `${Number(r.utilization_365d || 0).toFixed(1)}%` },

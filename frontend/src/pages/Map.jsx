@@ -1,10 +1,11 @@
 import { useEffect, useState, useRef } from "react";
-import { MapContainer, TileLayer, Marker, Popup, useMap } from "react-leaflet";
+import { Circle, MapContainer, TileLayer, Marker, Popup, Tooltip, useMap } from "react-leaflet";
 import MarkerClusterGroup from "react-leaflet-cluster";
 import "leaflet/dist/leaflet.css";
 import L from "leaflet";
 import { api } from "../lib/api";
 import { Badge, statusLabel } from "../lib/format";
+import { ASSET_TYPES } from "../lib/constants.js";
 
 // Component to auto-fit map bounds to markers
 function FitBounds({ markers }) {
@@ -28,7 +29,18 @@ L.Icon.Default.mergeOptions({
   shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
 });
 
-// Custom marker icons by asset type
+// Available is coloured by what the unit is, so a yard full of green dots can be
+// read at a glance. Every other status keeps one colour across all types,
+// because then the colour is telling you about the state rather than the kit.
+// These have to stay clear of the status colours below as well as each other.
+const AVAILABLE_BY_TYPE = {
+  "ALPR Trailer": "#10b981", // emerald
+  "Semi Truck": "#8b5cf6", // purple
+  "Fleet Vehicle": "#A9825B", // deep desert tan — far enough from both the emerald and the amber
+  ATP: "#db2777", // deep pink
+  "Sky Carrier": "#0891b2", // dark cyan — cooler and darker than the deployed blue
+};
+
 const createCustomIcon = (type, status) => {
   const colors = {
     available: "#10b981",
@@ -36,8 +48,12 @@ const createCustomIcon = (type, status) => {
     in_transit: "#f59e0b",
     maintenance: "#ef4444",
   };
-  
-  const color = colors[String(status || "").toLowerCase()] || "#6b7280";
+
+  const key = String(status || "").toLowerCase();
+  const color =
+    key === "available"
+      ? AVAILABLE_BY_TYPE[type] || colors.available
+      : colors[key] || "#6b7280";
   
   return L.divIcon({
     className: "custom-marker",
@@ -51,6 +67,8 @@ export default function Map() {
   const [assets, setAssets] = useState([]);
   const [warehouses, setWarehouses] = useState([]);
   const [agencies, setAgencies] = useState([]);
+  const [geofences, setGeofences] = useState([]);
+  const [showGeofences, setShowGeofences] = useState(false);
   const [loading, setLoading] = useState(true);
   const [filters, setFilters] = useState({
     assetType: "",
@@ -70,12 +88,14 @@ export default function Map() {
       setAssets(mapAssets);
       
       // Still load warehouses and agencies for filters
-      const [warehousesData, agenciesData] = await Promise.all([
+      const [warehousesData, agenciesData, fenceData] = await Promise.all([
         api("/warehouses"),
         api("/agencies"),
+        api("/geofences").catch(() => []),
       ]);
       setWarehouses(warehousesData);
       setAgencies(agenciesData);
+      setGeofences(fenceData);
     } catch (err) {
       console.error("Failed to load map data:", err);
     } finally {
@@ -132,9 +152,14 @@ export default function Map() {
           className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
         >
           <option value="">All Asset Types</option>
-          <option value="alpr_trailer">ALPR Trailer</option>
-          <option value="semi_truck">Semi Truck</option>
-          <option value="fleet_vehicle">Fleet Vehicle</option>
+          {/* Straight off the shared list, which carries the API's own
+              asset_type strings. The snake_case ones this used to hardcode
+              matched nothing and emptied the map. */}
+          {ASSET_TYPES.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
         </select>
 
         <select
@@ -181,6 +206,17 @@ export default function Map() {
         >
           Clear filters
         </button>
+
+        {/* Off by default: the circles are for checking a fence is the right
+            size, not something you want over the map while reading it. */}
+        <label className="flex items-center gap-2 text-sm text-slate-600">
+          <input
+            type="checkbox"
+            checked={showGeofences}
+            onChange={(e) => setShowGeofences(e.target.checked)}
+          />
+          Show geofences
+        </label>
       </div>
 
       {/* Map */}
@@ -196,6 +232,26 @@ export default function Map() {
             url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
           />
           <FitBounds markers={markers} />
+          {showGeofences
+            ? geofences.map((fence) => (
+                <Circle
+                  key={`${fence.kind}-${fence.id}`}
+                  center={[Number(fence.latitude), Number(fence.longitude)]}
+                  radius={fence.radius_m}
+                  pathOptions={{
+                    // Warehouses act on arrival, agencies only announce it, so
+                    // the two kinds of fence do not look the same.
+                    color: fence.kind === "warehouse" ? "#0d9488" : "#8b5cf6",
+                    weight: 1,
+                    fillOpacity: 0.08,
+                  }}
+                >
+                  <Tooltip>
+                    {fence.name} · {fence.radius_m} m
+                  </Tooltip>
+                </Circle>
+              ))
+            : null}
           <MarkerClusterGroup
             chunkedLoading
             spiderfyOnMaxZoom={true}
@@ -205,7 +261,9 @@ export default function Map() {
             iconCreateFunction={(cluster) => {
               const count = cluster.getChildCount();
               return L.divIcon({
-                html: `<div style="background: linear-gradient(135deg, #0ea5e9 0%, #06b6d4 100%); color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; border: 3px solid white; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">${count}</div>`,
+                // Neutral slate on purpose: a cluster is a count, not a status,
+                // so it must not wear a colour that means something on a dot.
+                html: `<div style="background: linear-gradient(135deg, #64748b 0%, #475569 100%); color: white; border-radius: 50%; width: 40px; height: 40px; display: flex; align-items: center; justify-content: center; font-weight: bold; font-size: 16px; border: 3px solid white; box-shadow: 0 4px 12px rgba(0,0,0,0.3);">${count}</div>`,
                 className: 'custom-cluster-icon',
                 iconSize: L.point(40, 40),
               });
@@ -217,6 +275,11 @@ export default function Map() {
                 position={[marker.lat, marker.lng]}
                 icon={createCustomIcon(marker.asset.asset_type, marker.asset.operational_status)}
               >
+                {/* Hover label. Offset clears the 24px dot, whose anchor is
+                    its centre, so the tooltip sits above rather than on it. */}
+                <Tooltip direction="top" offset={[0, -14]} opacity={1}>
+                  <span className="font-mono text-xs font-semibold">{marker.asset.vin}</span>
+                </Tooltip>
                 <Popup>
                   <div className="p-2">
                     <p className="font-semibold text-slate-900">{marker.asset.make_model}</p>
@@ -249,10 +312,17 @@ export default function Map() {
       <div className="mt-4 rounded-lg border border-slate-200 bg-white p-4">
         <p className="text-sm font-semibold text-slate-900">Legend</p>
         <div className="mt-2 flex flex-wrap gap-4">
-          <div className="flex items-center gap-2">
-            <div className="h-3 w-3 rounded-full bg-emerald-500"></div>
-            <span className="text-xs text-slate-600">Available</span>
-          </div>
+          {/* One swatch per type, from the same map the dots are drawn from, so
+              the legend cannot drift out of step with the pins. */}
+          {ASSET_TYPES.map((type) => (
+            <div key={type} className="flex items-center gap-2">
+              <div
+                className="h-3 w-3 rounded-full"
+                style={{ backgroundColor: AVAILABLE_BY_TYPE[type] }}
+              ></div>
+              <span className="text-xs text-slate-600">Available · {type}</span>
+            </div>
+          ))}
           <div className="flex items-center gap-2">
             <div className="h-3 w-3 rounded-full bg-blue-500"></div>
             <span className="text-xs text-slate-600">Deployed</span>

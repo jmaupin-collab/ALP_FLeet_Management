@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import (
     Asset,
     AssetOperationalStatus,
+    AssetType,
     CustodyType,
     Deployment,
     DeploymentStatus,
@@ -97,6 +98,7 @@ class AssetUtilization:
     asset_id: UUID
     vin: str
     make_model: str
+    asset_type: str
     source: str
     consecutive_unused_days: int
     current_state: str
@@ -283,6 +285,7 @@ def compute_asset_utilization(asset: Asset, now: datetime | None = None) -> Asse
         asset_id=asset.id,
         vin=asset.vin,
         make_model=asset.make_model,
+        asset_type=asset.asset_type.value,
         source="lifecycle_history",
         consecutive_unused_days=unused,
         current_state=current,
@@ -316,6 +319,7 @@ def utilization_to_dict(result: AssetUtilization) -> dict:
         "asset_id": result.asset_id,
         "vin": result.vin,
         "make_model": result.make_model,
+        "asset_type": result.asset_type,
         "source": result.source,
         "consecutive_unused_days": result.consecutive_unused_days,
         "current_state": result.current_state,
@@ -344,7 +348,7 @@ def load_asset_for_utilization(db: Session, asset_id: UUID) -> Asset | None:
     )
 
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from app.deps import get_current_user, require_reporter
 from app.database import get_db
 from app.models import User
@@ -366,14 +370,29 @@ def get_asset_utilization(
 
 @router.get("/analytics/utilization")
 def get_fleet_utilization(
+    asset_type: AssetType | None = Query(
+        default=None,
+        description="Limit the rollup to one asset type. Omit to cover the whole fleet.",
+    ),
     current_user: User = Depends(require_reporter),
     db: Session = Depends(get_db),
 ) -> list[dict]:
-    return fleet_utilization(db, current_user.organization_id)
+    return fleet_utilization(db, current_user.organization_id, asset_type=asset_type)
 
 
-def fleet_utilization(db: Session, organization_id: UUID) -> list[dict]:
-    assets = db.scalars(
+def fleet_utilization(
+    db: Session,
+    organization_id: UUID,
+    asset_type: AssetType | None = None,
+) -> list[dict]:
+    """Deployed-vs-available rollup across every asset type.
+
+    Utilization is most meaningful for units that get deployed, but a truck or a
+    vehicle sitting idle for ninety days is worth seeing too, so the whole fleet
+    is reported and narrowing it is left to the caller. Pass an asset_type to
+    scope it to one.
+    """
+    stmt = (
         select(Asset)
         .options(
             selectinload(Asset.deployments),
@@ -382,7 +401,10 @@ def fleet_utilization(db: Session, organization_id: UUID) -> list[dict]:
         )
         .where(Asset.organization_id == organization_id)
         .where(Asset.is_archived.is_(False))
-    ).all()
+    )
+    if asset_type is not None:
+        stmt = stmt.where(Asset.asset_type == asset_type)
+    assets = db.scalars(stmt).all()
     rows = []
     for asset in assets:
         if asset.operational_status == AssetOperationalStatus.RETIRED:

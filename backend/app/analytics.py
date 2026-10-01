@@ -6,7 +6,17 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Asset, AssetType, Inspection, InspectionItem, InspectionResult, MaintenanceWorkOrder, RepairChannel
+from app.models import (
+    Asset,
+    AssetType,
+    CustodyType,
+    Deployment,
+    Inspection,
+    InspectionItem,
+    InspectionResult,
+    MaintenanceWorkOrder,
+    RepairChannel,
+)
 from app.schemas import (
     AnalyticsHub,
     EfficiencyRow,
@@ -197,36 +207,67 @@ def build_analytics(db: Session, asset_type: AssetType | None = None, organizati
     ]
     repeats.sort(key=lambda row: row["count"], reverse=True)
 
-    # Calculate deployment statistics by month (last 12 months)
-    from app.models import Deployment
+    # Deployment statistics by month (last 12 months).
+    #
+    # A deployment is custody passing to an agency. The Deployment table is an
+    # append-only custody ledger, so every warehouse put-away and transit leg is
+    # a row in it too; counting rows is what made this chart report more
+    # deployments in a month than there were trailers to deploy.
     from app.schemas import DeploymentStats
-    
-    deployments = db.scalars(select(Deployment)).all()
+
+    deployments_query = select(Deployment).where(Deployment.custody_type == CustodyType.CUSTOMER_AGENCY)
+    if organization_id is not None:
+        deployments_query = deployments_query.where(Deployment.organization_id == organization_id)
+
+    # Narrowed once and reused: the deployment metrics further down used to read
+    # an unscoped query, so they counted other tenants' rows as well.
+    deployments = [
+        dep
+        for dep in db.scalars(deployments_query).all()
+        if (asset := asset_by_id.get(dep.asset_id)) is not None
+        and not asset.is_archived
+        and _filter_type(asset_type, asset.asset_type)
+    ]
+
     monthly_deployments: dict[str, int] = defaultdict(int)
-    total_assets = len(asset_by_id)
-    
-    # Group deployments by month
+    monthly_assets: dict[str, set[UUID]] = defaultdict(set)
     for dep in deployments:
-        if dep.started_at:
-            asset = asset_by_id.get(dep.asset_id)
-            if asset and not asset.is_archived and _filter_type(asset_type, asset.asset_type):
-                month_key = dep.started_at.strftime("%Y-%m")
-                monthly_deployments[month_key] += 1
-    
-    # Build deployment stats for last 12 months
+        month_key = _as_utc(dep.started_at).strftime("%Y-%m")
+        monthly_deployments[month_key] += 1
+        monthly_assets[month_key].add(dep.asset_id)
+
+    # The denominator has to be the same slice of the fleet as the numerator:
+    # measuring type-filtered deployments against every asset of every type
+    # produced a percentage of nothing in particular.
+    eligible_assets = sum(
+        1
+        for asset in asset_by_id.values()
+        if not asset.is_archived and _filter_type(asset_type, asset.asset_type)
+    )
+
     deployment_stats = []
-    for i in range(12):
-        month_date = now - timedelta(days=30 * i)
-        month_key = month_date.strftime("%Y-%m")
-        count = monthly_deployments.get(month_key, 0)
-        percentage = (Decimal(count) / Decimal(total_assets) * 100) if total_assets > 0 else Decimal("0")
+    cursor = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    for _ in range(12):
+        month_key = cursor.strftime("%Y-%m")
+        # Distinct assets, so redeploying one unit twice cannot push the share of
+        # the fleet that went out past 100%.
+        deployed_assets = len(monthly_assets.get(month_key, ()))
+        percentage = (
+            Decimal(deployed_assets) / Decimal(eligible_assets) * 100
+            if eligible_assets
+            else Decimal("0")
+        )
         deployment_stats.append(
             DeploymentStats(
-                month=month_date.strftime("%b %Y"),
-                deployment_count=count,
-                deployment_percentage=percentage.quantize(Decimal("0.1"))
+                month=cursor.strftime("%b %Y"),
+                deployment_count=monthly_deployments.get(month_key, 0),
+                deployment_percentage=percentage.quantize(Decimal("0.1")),
             )
         )
+        # Stepping back a day from the 1st always lands in the previous month.
+        # Stepping back 30 days does not, which is how this list managed to show
+        # "Jul 2026" twice and skip a month entirely.
+        cursor = (cursor - timedelta(days=1)).replace(day=1)
     deployment_stats.reverse()  # Show oldest to newest
 
     # Calculate additional metrics

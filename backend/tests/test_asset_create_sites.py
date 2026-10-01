@@ -131,6 +131,29 @@ def test_blank_site_id_is_rejected_rather_than_silently_dropped(client, org):
     assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
 
 
+def test_a_three_character_asset_id_is_accepted(client, org, db_session):
+    """Short yard tags like 'A12' are real; the floor is 3, not 4."""
+    response = client.post(
+        "/assets",
+        json=payload(vin="A12", current_location="Phoenix Depot", warehouse_id=str(org["warehouse"].id)),
+        headers=token_for(client),
+    )
+
+    assert response.status_code == status.HTTP_201_CREATED, response.text
+    assert db_session.query(Asset).one().vin == "A12"
+
+
+def test_a_two_character_asset_id_is_still_refused(client, org, db_session):
+    response = client.post(
+        "/assets",
+        json=payload(vin="A1", current_location="Phoenix Depot", warehouse_id=str(org["warehouse"].id)),
+        headers=token_for(client),
+    )
+
+    assert response.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+    assert db_session.query(Asset).count() == 0
+
+
 def test_a_site_from_another_organization_is_refused(client, org, db_session):
     foreign = Organization(name="Foreign", slug="foreign-site-org", org_type="internal")
     db_session.add(foreign)

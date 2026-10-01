@@ -123,10 +123,20 @@ class AssetOut(BaseModel):
 
 
 class AssetTypeKpis(BaseModel):
+    """Per-type breakdown carrying the same states as the headline cards.
+
+    The dashboard table and the cards read from the same buckets so a row can
+    never disagree with the number above it.
+    """
+
     asset_type: AssetType
     total_assets: int
     deployed: int
+    available: int = 0
+    in_transit: int = 0
     in_maintenance: int
+    out_of_service: int = 0
+    retired: int = 0
     idle_or_stored: int
     total_purchase_cost: Decimal
     downtime_hours_ytd: Decimal
@@ -144,8 +154,10 @@ class NonAlprInventoryRow(BaseModel):
 
 
 class DashboardKpis(BaseModel):
-    # Operational readiness is an ALPR Trailer concept; every count below is
-    # scoped to this type. Other asset types roll up in non_alpr_inventory.
+    # Readiness defaults to ALPR Trailers, so every count below is scoped to one
+    # asset type unless the caller asked for all of them. asset_type_scope names
+    # whichever scope produced these numbers; non_alpr_inventory rolls up the
+    # types left out of it.
     asset_type_scope: str
     fleet_size: int
     deployed: int
@@ -472,7 +484,7 @@ class AnalyticsHub(BaseModel):
 
 
 class AssetCreate(BaseModel):
-    vin: str = Field(min_length=4, max_length=32)
+    vin: str = Field(min_length=3, max_length=32)
     license_plate: str | None = Field(default=None, max_length=16)
     license_plate_state: str | None = Field(default=None, max_length=2)
     make_model: str = Field(min_length=2, max_length=255)
@@ -516,7 +528,7 @@ class AssetImportResult(BaseModel):
 
 
 class AssetUpdate(BaseModel):
-    vin: str | None = Field(default=None, min_length=4, max_length=32)
+    vin: str | None = Field(default=None, min_length=3, max_length=32)
     license_plate: str | None = Field(default=None, max_length=16)
     license_plate_state: str | None = Field(default=None, max_length=2)
     make_model: str | None = Field(default=None, min_length=2, max_length=255)
@@ -667,21 +679,47 @@ class RepairCostAdd(BaseModel):
     notes: str | None = None
 
 
+def _clean_contact(value: str | None) -> str | None:
+    """Collapse whitespace and treat a blank entry as no entry.
+
+    The phone number is not reformatted: extensions, mobile numbers and
+    international formats all have to come back out exactly as typed.
+    """
+    cleaned = " ".join((value or "").split())
+    return cleaned or None
+
+
 class DirectoryCreate(BaseModel):
     name: str = Field(min_length=2, max_length=255)
     address: str | None = None
     agency_type: str | None = None
-    contact_name: str | None = None
+    contact_name: str | None = Field(default=None, max_length=255)
+    contact_phone: str | None = Field(default=None, max_length=64)
     specialty: str | None = None
+    # How far out this site's geofence reaches. Null uses the configured
+    # default. Bounded so a typo cannot fence half a state.
+    geofence_radius_m: int | None = Field(default=None, ge=25, le=25_000)
+
+    @field_validator("contact_name", "contact_phone")
+    @classmethod
+    def clean_contact(cls, value: str | None) -> str | None:
+        return _clean_contact(value)
 
 
 class DirectoryUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=2, max_length=255)
     address: str | None = None
     agency_type: str | None = None
-    contact_name: str | None = None
+    contact_name: str | None = Field(default=None, max_length=255)
+    contact_phone: str | None = Field(default=None, max_length=64)
     specialty: str | None = None
+    geofence_radius_m: int | None = Field(default=None, ge=25, le=25_000)
     is_archived: bool | None = None
+
+    @field_validator("contact_name", "contact_phone")
+    @classmethod
+    def clean_contact(cls, value: str | None) -> str | None:
+        return _clean_contact(value)
 
 
 class DirectoryOut(BaseModel):
@@ -697,10 +735,12 @@ class DirectoryOut(BaseModel):
     address: str | None = None
     agency_type: str | None = None
     contact_name: str | None = None
+    contact_phone: str | None = None
     specialty: str | None = None
     site_name: str | None = None
     latitude: Decimal | None = None
     longitude: Decimal | None = None
+    geofence_radius_m: int | None = None
 
 
 class InspectionListOut(BaseModel):

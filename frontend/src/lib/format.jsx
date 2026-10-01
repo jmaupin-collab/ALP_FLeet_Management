@@ -72,10 +72,16 @@ export function statusClass(value) {
   return map[key] ?? "bg-slate-100 text-slate-700 ring-slate-200";
 }
 
+const TYPE_CLASSES = {
+  "ALPR Trailer": "bg-teal-50 text-teal-800 ring-teal-200",
+  "Semi Truck": "bg-blue-50 text-blue-800 ring-blue-200",
+  "Fleet Vehicle": "bg-violet-50 text-violet-800 ring-violet-200",
+  ATP: "bg-pink-50 text-pink-800 ring-pink-200",
+  "Sky Carrier": "bg-cyan-50 text-cyan-800 ring-cyan-200",
+};
+
 export function typeClass(value) {
-  if (value === "ALPR Trailer") return "bg-teal-50 text-teal-800 ring-teal-200";
-  if (value === "Semi Truck") return "bg-blue-50 text-blue-800 ring-blue-200";
-  return "bg-violet-50 text-violet-800 ring-violet-200";
+  return TYPE_CLASSES[value] ?? "bg-slate-100 text-slate-700 ring-slate-200";
 }
 
 export function Badge({ value, tone }) {

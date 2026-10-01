@@ -1,6 +1,6 @@
 from app.models import AssetType
 
-ALPR_TRAILER_CHECKLIST = [
+TRAILER_CHECKLIST = [
     "Solar Panels",
     "ALPR Cameras",
     "Batteries",
@@ -23,7 +23,12 @@ LEMON_WARNING = (
 )
 
 
+# Split by what is physically there to inspect, not by how the type is reported
+# elsewhere: a towed unit has no engine, brakes or cabin to check.
+TRAILER_TYPES = frozenset({AssetType.ALPR_TRAILER, AssetType.ATP, AssetType.SKY_CARRIER})
+
+
 def checklist_for(asset_type: AssetType) -> list[str]:
-    if asset_type == AssetType.ALPR_TRAILER:
-        return list(ALPR_TRAILER_CHECKLIST)
+    if asset_type in TRAILER_TYPES:
+        return list(TRAILER_CHECKLIST)
     return list(VEHICLE_CHECKLIST)

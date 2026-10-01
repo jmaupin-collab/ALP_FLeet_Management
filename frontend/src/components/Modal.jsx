@@ -21,11 +21,12 @@ export function Notice({ error, success }) {
   );
 }
 
-export function Field({ label, children }) {
+export function Field({ label, children, hint }) {
   return (
     <label className="block text-sm text-slate-700">
       {label}
       <div className="mt-1">{children}</div>
+      {hint ? <p className="mt-1 text-xs text-slate-500">{hint}</p> : null}
     </label>
   );
 }

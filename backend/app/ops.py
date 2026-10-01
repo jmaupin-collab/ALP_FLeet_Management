@@ -518,10 +518,12 @@ def end_deployment_workflow(db: Session, asset: Asset, payload: EndDeploymentWor
         db.add(new_deployment)
     
     elif payload.disposition == "in_transit":
-        if not payload.carrier_name or not payload.tracking_code:
+        # Tracking codes are often issued after pickup, so only the carrier is
+        # required here. This matches apply_custody().
+        if not payload.carrier_name:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="carrier_name and tracking_code required for in_transit disposition"
+                detail="carrier_name required for in_transit disposition"
             )
         if not payload.transit_destination:
             raise HTTPException(
@@ -921,6 +923,7 @@ def create_warehouse(db: Session, payload: DirectoryCreate, organization_id: UUI
         address=payload.address,
         latitude=latitude,
         longitude=longitude,
+        geofence_radius_m=payload.geofence_radius_m,
         created_by_id=user_id,
     )
     db.add(row)
@@ -948,6 +951,7 @@ def create_agency(db: Session, payload: DirectoryCreate, organization_id: UUID, 
         address=payload.address,
         latitude=latitude,
         longitude=longitude,
+        geofence_radius_m=payload.geofence_radius_m,
         created_by_id=user_id,
     )
     db.add(row)
@@ -965,6 +969,8 @@ def create_vendor(db: Session, payload: DirectoryCreate, organization_id: UUID, 
         organization_id=organization_id,
         name=payload.name.strip(),
         specialty=payload.specialty,
+        contact_name=payload.contact_name,
+        contact_phone=payload.contact_phone,
         created_by_id=user_id,
     )
     db.add(row)

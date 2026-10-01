@@ -55,7 +55,7 @@ COLUMNS: tuple[Column, ...] = (
         "vin",
         "Asset ID",
         True,
-        "Unique ID or VIN, 4-32 characters.",
+        "Unique ID or VIN, 3-32 characters.",
         ("vin", "asset_id", "asset id / vin", "asset tag", "serial", "serial number"),
     ),
     Column(
@@ -137,6 +137,9 @@ ASSET_TYPE_ALIASES = {
     "vehicle": AssetType.FLEET_VEHICLE,
     "fleetvehicle": AssetType.FLEET_VEHICLE,
     "car": AssetType.FLEET_VEHICLE,
+    # "ATP" and "Sky Carrier" need no aliases of their own: the parser already
+    # matches both the stored label and the member name.
+    "sky": AssetType.SKY_CARRIER,
 }
 
 CUSTODY_TYPE_ALIASES = {

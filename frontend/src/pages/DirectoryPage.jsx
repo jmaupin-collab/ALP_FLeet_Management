@@ -38,13 +38,23 @@ export default function DirectoryPage({ title, path, extraFields }) {
       setError("Name is required.");
       return;
     }
+    // An untouched number input sends "", which is not a number and not null.
+    // Blanking one has to mean "no value", not "zero".
+    const payload = { ...form };
+    extraFields
+      .filter((field) => field.type === "number")
+      .forEach((field) => {
+        const value = payload[field.key];
+        payload[field.key] = value === "" || value === undefined ? null : Number(value);
+      });
+
     setBusy(true);
     try {
       if (form.id) {
-        await api(`${path}/${form.id}`, { method: "PATCH", body: JSON.stringify(form) });
+        await api(`${path}/${form.id}`, { method: "PATCH", body: JSON.stringify(payload) });
         setSuccess("Record updated.");
       } else {
-        await api(path, { method: "POST", body: JSON.stringify(form) });
+        await api(path, { method: "POST", body: JSON.stringify(payload) });
         setSuccess("Record created.");
       }
       setModal(null);
@@ -100,7 +110,11 @@ export default function DirectoryPage({ title, path, extraFields }) {
       <DataTable
         columns={[
           { key: "name", header: "Name" },
-          ...extraFields.map((field) => ({ key: field.key, header: field.label, render: (r) => r[field.key] || "—" })),
+          ...extraFields.map((field) => ({
+            key: field.key,
+            header: field.label,
+            render: field.render || ((r) => r[field.key] || "—"),
+          })),
           ...(path === "/agencies" || path === "/warehouses"
             ? [{ key: "latitude", header: "Map", render: (r) => (r.latitude && r.longitude ? "Geocoded" : "Needs address") }]
             : []),
@@ -136,8 +150,14 @@ export default function DirectoryPage({ title, path, extraFields }) {
               <input required className={inputClass} value={form.name || ""} onChange={(e) => setForm({ ...form, name: e.target.value })} />
             </Field>
             {extraFields.map((field) => (
-              <Field key={field.key} label={field.label}>
-                <input className={inputClass} value={form[field.key] || ""} onChange={(e) => setForm({ ...form, [field.key]: e.target.value })} />
+              <Field key={field.key} label={field.label} hint={field.hint}>
+                <input
+                  type={field.type || "text"}
+                  className={inputClass}
+                  placeholder={field.placeholder}
+                  value={form[field.key] ?? ""}
+                  onChange={(e) => setForm({ ...form, [field.key]: e.target.value })}
+                />
               </Field>
             ))}
             <button disabled={busy} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">

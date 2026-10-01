@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import AssetDocuments from "../components/AssetDocuments.jsx";
+import AssetTracking from "../components/AssetTracking.jsx";
 import AssetUtilization from "../components/AssetUtilization.jsx";
 import { CustodySummary, LemonBanner } from "../components/Custody.jsx";
 import InspectionChecklist from "../components/InspectionChecklist.jsx";
@@ -8,16 +9,12 @@ import { Field, Modal, Notice, inputClass } from "../components/Modal.jsx";
 import { api } from "../lib/api.js";
 import { ASSET_TYPES, CUSTODY_TYPES, DEPLOYMENT_STATUSES, OPEN_WO_STATUSES, OPERATIONAL_STATUSES, REPAIR_CHANNELS, WORK_ORDER_STATUSES } from "../lib/constants.js";
 
-const WAREHOUSE_STATUSES = OPERATIONAL_STATUSES.filter((status) => !["deployed", "in_transit"].includes(status));
-
-// The site you pick is the location, so each custody type points at its own
-// directory rather than asking for the same place twice.
-const SITE_FIELD = {
-  "Customer / LE Agency": { key: "agency_id", label: "Customer / Agency", directory: "agencies" },
-  "In Transit": { key: "warehouse_id", label: "Destination warehouse", directory: "warehouses" },
-  "Warehouse Depot": { key: "warehouse_id", label: "Warehouse", directory: "warehouses" },
-};
 import { Badge, hours, money } from "../lib/format.jsx";
+// The site you pick is the location, so the form never asks for the same place
+// twice. lib/sites.jsx owns which directories each custody type can draw from.
+import { SITE_FIELD, SiteSelect, needsSite } from "../lib/sites.jsx";
+
+const WAREHOUSE_STATUSES = OPERATIONAL_STATUSES.filter((status) => !["deployed", "in_transit"].includes(status));
 
 export default function AssetTimeline() {
   const { assetId } = useParams();
@@ -27,6 +24,7 @@ export default function AssetTimeline() {
   const [meterReading, setMeterReading] = useState(null);
   const [warehouses, setWarehouses] = useState([]);
   const [agencies, setAgencies] = useState([]);
+  const [geofenceEvents, setGeofenceEvents] = useState([]);
   const [ready, setReady] = useState(false);
   const [inspection, setInspection] = useState(null);
   const [error, setError] = useState("");
@@ -40,18 +38,22 @@ export default function AssetTimeline() {
   async function load() {
     const timeline = await api(`/assets/${assetId}/timeline`);
     setProfile(timeline);
-    const [orders, pmSch, meter, whList, agList] = await Promise.all([
+    const [orders, pmSch, meter, whList, agList, fenceEvents] = await Promise.all([
       api(`/work-orders?asset_id=${assetId}&include_archived=true`),
       api(`/pm/schedules?asset_id=${assetId}`),
       api(`/assets/${assetId}/meters/latest`),
       api(`/warehouses`),
       api(`/agencies`),
+      // Only units with a tracker have any of these, so an empty list is the
+      // normal case rather than a failure.
+      api(`/assets/${assetId}/geofence-events`).catch(() => []),
     ]);
     setWorkOrders(orders);
     setPmSchedules(pmSch);
     setMeterReading(meter);
     setWarehouses(whList);
     setAgencies(agList);
+    setGeofenceEvents(fenceEvents);
     setReady(true);
   }
 
@@ -397,6 +399,40 @@ export default function AssetTimeline() {
         <InspectionChecklist inspection={inspection} onMark={onMark} busyId={busyId} />
       </div>
 
+      <AssetTracking assetId={assetId} onChange={() => load().catch(() => {})} />
+
+      {/* Only rendered for units that actually report a position, so the page
+          is unchanged for everything without a tracker. */}
+      {geofenceEvents.length > 0 ? (
+        <div>
+          <h3 className="mb-3 text-sm font-semibold text-slate-800">Tracker arrivals and departures</h3>
+          <ol className="space-y-2">
+            {geofenceEvents.map((event) => (
+              <li
+                key={event.id}
+                className={`rounded-xl border bg-white p-3 text-sm shadow-sm ${
+                  event.was_unexpected ? "border-amber-300" : "border-slate-200"
+                }`}
+              >
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge value={event.event_type} />
+                  <span className="font-medium text-slate-900">{event.zone_name}</span>
+                  {event.was_unexpected ? (
+                    <span className="rounded-full bg-amber-50 px-2 py-0.5 text-xs font-medium text-amber-900 ring-1 ring-amber-200">
+                      Nothing scheduled explained this
+                    </span>
+                  ) : null}
+                </div>
+                <p className="mt-1 text-slate-600">
+                  {event.occurred_at}
+                  {event.action_taken ? ` · ${event.action_taken} automatically` : ""}
+                </p>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+
       <div>
         <h3 className="mb-3 text-sm font-semibold text-slate-800">Lifecycle timeline</h3>
         {profile.events.length === 0 ? (
@@ -447,7 +483,7 @@ export default function AssetTimeline() {
             }}
           >
             <Field label="Asset ID">
-              <input required minLength={4} maxLength={32} className={inputClass} value={form.vin} onChange={(e) => setForm({ ...form, vin: e.target.value })} />
+              <input required minLength={3} maxLength={32} className={inputClass} value={form.vin} onChange={(e) => setForm({ ...form, vin: e.target.value })} />
             </Field>
             <div className="grid grid-cols-3 gap-3">
               <div className="col-span-2">
@@ -557,9 +593,11 @@ export default function AssetTimeline() {
             className="space-y-3"
             onSubmit={(e) => {
               e.preventDefault();
-              const site = SITE_FIELD[form.custody_type];
-              const chosen = site
-                ? (site.directory === "agencies" ? agencies : warehouses).find((row) => row.id === form[site.key])
+              // Either directory can be the destination, so match on whichever
+              // id the picker set rather than on the custody type.
+              const selectedId = form.warehouse_id || form.agency_id;
+              const chosen = selectedId
+                ? [...warehouses, ...agencies].find((row) => row.id === selectedId)
                 : null;
               const payload = {
                 custody_type: form.custody_type,
@@ -593,28 +631,16 @@ export default function AssetTimeline() {
                 ))}
               </select>
             </Field>
-            {SITE_FIELD[form.custody_type] ? (
+            {needsSite(form.custody_type) ? (
               <Field label={SITE_FIELD[form.custody_type].label}>
-                <select
-                  required
+                <SiteSelect
+                  custodyType={form.custody_type}
+                  form={form}
+                  warehouses={warehouses}
+                  agencies={agencies}
                   className={inputClass}
-                  value={form[SITE_FIELD[form.custody_type].key] || ""}
-                  onChange={(e) =>
-                    setForm({
-                      ...form,
-                      agency_id: "",
-                      warehouse_id: "",
-                      [SITE_FIELD[form.custody_type].key]: e.target.value,
-                    })
-                  }
-                >
-                  <option value="">Select {SITE_FIELD[form.custody_type].label.toLowerCase()}</option>
-                  {(SITE_FIELD[form.custody_type].directory === "agencies" ? agencies : warehouses).map((row) => (
-                    <option key={row.id} value={row.id}>
-                      {row.name}{row.site_name ? ` - ${row.site_name}` : ""}
-                    </option>
-                  ))}
-                </select>
+                  onSelect={(patch) => setForm({ ...form, ...patch })}
+                />
                 <p className="mt-1 text-xs text-slate-500">The location and map pin come from this record.</p>
               </Field>
             ) : null}
@@ -646,9 +672,11 @@ export default function AssetTimeline() {
               </Field>
             ) : null}
             <Field label="3PL carrier">
-              <input disabled={form.custody_type !== "In Transit"} className={inputClass} value={form.carrier_name || ""} onChange={(e) => setForm({ ...form, carrier_name: e.target.value })} />
+              {/* The server requires a carrier for in-transit custody, so ask for
+                  it here rather than letting the save come back a 422. */}
+              <input required={form.custody_type === "In Transit"} disabled={form.custody_type !== "In Transit"} className={inputClass} value={form.carrier_name || ""} onChange={(e) => setForm({ ...form, carrier_name: e.target.value })} />
             </Field>
-            <Field label="Tracking code">
+            <Field label="Tracking code (optional)">
               <input disabled={form.custody_type !== "In Transit"} className={inputClass} value={form.tracking_code || ""} onChange={(e) => setForm({ ...form, tracking_code: e.target.value })} />
             </Field>
             <button disabled={busy} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">
@@ -994,11 +1022,11 @@ function EndDeploymentModal({ form, setForm, warehouses, agencies, busy, onClose
             </Field>
             <Field label="Tracking Code">
               <input
-                required
                 className={inputClass}
                 value={form.tracking_code || ""}
                 onChange={(e) => setForm({ ...form, tracking_code: e.target.value })}
               />
+              <p className="mt-1 text-xs text-slate-500">Optional — add it once the carrier issues one.</p>
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="Departure Date">

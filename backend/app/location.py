@@ -203,19 +203,18 @@ def get_asset_location(db: Session, asset: Asset) -> AssetLocation:
 
     active_deployment = get_active_deployment(db, asset.id)
 
-    # In transit: new destination address if stored, otherwise last-known pin
+    # In transit: no coordinates unless a tracker is actually reporting.
+    #
+    # A unit on a truck is somewhere between its origin and its destination, and
+    # pinning it at either end states a location nobody has verified. Thirty
+    # trailers shown sitting at Mohawk when they left days ago is worse than
+    # showing nothing, because the map is read as fact. Live telematics is
+    # handled above and still pins; everything else drops off the map and is
+    # described by name instead.
     if in_transit:
-        if (
-            active_deployment
-            and active_deployment.latitude is not None
-            and active_deployment.longitude is not None
-        ):
-            pin = (active_deployment.latitude, active_deployment.longitude)
-        else:
-            pin = _last_known_coordinates(db, asset)
         return AssetLocation(
-            latitude=pin[0],
-            longitude=pin[1],
+            latitude=None,
+            longitude=None,
             location_name=f"In Transit via {asset.carrier_name}" if asset.carrier_name else (asset.current_location or "In Transit"),
             location_source=LocationSource.IN_TRANSIT,
             location_timestamp=asset.updated_at,
@@ -408,21 +407,6 @@ def get_asset_location(db: Session, asset: Asset) -> AssetLocation:
         location_timestamp=asset.updated_at,
         is_stale=False,
     )
-
-
-def _last_known_coordinates(db: Session, asset: Asset) -> tuple[Decimal | None, Decimal | None]:
-    gps = get_latest_gps_location(db, asset.id)
-    if gps and gps.latitude is not None and gps.longitude is not None:
-        return gps.latitude, gps.longitude
-    if asset.agency_id:
-        agency = db.get(Agency, asset.agency_id)
-        if agency and agency.latitude and agency.longitude:
-            return agency.latitude, agency.longitude
-    if asset.warehouse_id:
-        warehouse = db.get(Warehouse, asset.warehouse_id)
-        if warehouse and warehouse.latitude and warehouse.longitude:
-            return warehouse.latitude, warehouse.longitude
-    return None, None
 
 
 def get_latest_gps_location(db: Session, asset_id: UUID) -> GPSLocation | None:

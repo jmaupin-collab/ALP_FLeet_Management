@@ -2,7 +2,12 @@
 
 from decimal import Decimal
 
-from app.geocoding import geocode_address, looks_like_street_address
+from app.geocoding import (
+    expand_street_abbreviations,
+    geocode_address,
+    geocode_directory_address,
+    looks_like_street_address,
+)
 
 
 class _FakeResponse:
@@ -69,6 +74,73 @@ def test_geocode_uses_nominatim_house_result(monkeypatch):
     monkeypatch.setattr("app.geocoding.requests.Session.get", fake_get)
     coords = geocode_address("123 Main St, Springfield, MO")
     assert coords == (Decimal("37.1912342"), Decimal("-93.3313083"))
+
+
+def test_abbreviations_expand_by_position():
+    # A real agency address that resolved nowhere until the abbreviations went.
+    assert (
+        expand_street_abbreviations("2200 Rev Abraham Woods JR BLVD Birmingham, AL 35203")
+        == "2200 Reverend Abraham Woods JR Boulevard Birmingham, AL 35203"
+    )
+    # "St" is Saint after the house number and Street at the end of the street.
+    assert expand_street_abbreviations("123 St Charles Ave") == "123 Saint Charles Avenue"
+    assert expand_street_abbreviations("123 Main St, Springfield, MO") == "123 Main Street, Springfield, MO"
+
+
+def test_geocode_retries_with_the_abbreviations_spelled_out(monkeypatch):
+    """The first pass finds nothing; the expanded street matches."""
+    seen = []
+
+    def fake_get(self, url, params=None, headers=None, timeout=None):
+        query = (params or {}).get("address") or (params or {}).get("q") or ""
+        seen.append(query)
+        if "Boulevard" not in query:
+            return _FakeResponse({"result": {"addressMatches": []}} if "census.gov" in url else [])
+        if "census.gov" in url:
+            return _FakeResponse({"result": {"addressMatches": []}})
+        return _FakeResponse([{"lat": "33.5235208", "lon": "-86.8063399", "class": "highway", "type": "secondary"}])
+
+    monkeypatch.setattr("app.geocoding.requests.Session.get", fake_get)
+
+    coords = geocode_address("2200 Rev Abraham Woods JR BLVD Birmingham, AL 35203")
+    assert coords == (Decimal("33.5235208"), Decimal("-86.8063399"))
+    assert any("Boulevard" in query for query in seen)
+
+
+def test_directory_address_falls_back_to_its_zip_rather_than_no_pin(monkeypatch):
+    """A warehouse or agency with nowhere on the map is worse than an approximate town."""
+
+    def fake_get(self, url, params=None, headers=None, timeout=None):
+        query = (params or {}).get("address") or (params or {}).get("q") or ""
+        if "census.gov" in url:
+            return _FakeResponse({"result": {"addressMatches": []}})
+        if query == "35203":
+            return _FakeResponse([{"lat": "33.5170766", "lon": "-86.8080463", "class": "place", "type": "postcode"}])
+        return _FakeResponse([])
+
+    monkeypatch.setattr("app.geocoding.requests.Session.get", fake_get)
+
+    coords = geocode_directory_address(
+        "2200 Rev Abraham Woods JR BLVD Birmingham, AL 35203", label="Agency"
+    )
+    assert coords == (Decimal("33.5170766"), Decimal("-86.8080463"))
+
+
+def test_a_town_centroid_never_replaces_coordinates_we_already_have(monkeypatch):
+    def fake_get(self, url, params=None, headers=None, timeout=None):
+        if "census.gov" in url:
+            return _FakeResponse({"result": {"addressMatches": []}})
+        return _FakeResponse([{"lat": "33.5170766", "lon": "-86.8080463", "class": "place", "type": "postcode"}])
+
+    monkeypatch.setattr("app.geocoding.requests.Session.get", fake_get)
+
+    existing = (Decimal("33.5234271"), Decimal("-86.8076569"))
+    assert (
+        geocode_directory_address(
+            "2200 Rev Abraham Woods JR BLVD Birmingham, AL 35203", label="Agency", existing=existing
+        )
+        == existing
+    )
 
 
 def test_looks_like_street_address_rejects_city_state():

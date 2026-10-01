@@ -1,4 +1,5 @@
-export const ASSET_TYPES = ["ALPR Trailer", "Semi Truck", "Fleet Vehicle"];
+// Must stay in step with AssetType in backend/app/models.py.
+export const ASSET_TYPES = ["ALPR Trailer", "Semi Truck", "Fleet Vehicle", "ATP", "Sky Carrier"];
 export const CUSTODY_TYPES = ["Warehouse Depot", "In Transit", "Customer / LE Agency"];
 export const DEPLOYMENT_STATUSES = ["scheduled", "active", "completed", "cancelled", "staged", "in_transit", "deployed", "idle", "stored", "returned"];
 export const OPERATIONAL_STATUSES = ["available", "deployed", "in_transit", "maintenance", "retired"];

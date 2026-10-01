@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.deps import require_operator
 from app.database import get_db
 from app.models import (
+    OPERATIONAL_ASSET_TYPE,
     Asset,
     AssetDocument,
     AssetOperationalStatus,
@@ -295,7 +296,13 @@ def refresh_attention(db: Session, organization_id: UUID, *, force: bool = True)
                 link_path=f"/assets/{asset.id}",
             )
         util = compute_asset_utilization(asset, now)
-        if "Low Utilization" in util.flags or "Available > 30 Days" in util.flags:
+        # A Semi Truck sitting between hauls is not "underutilized", so the
+        # idle-time alert is ALPR only. High Downtime below stays fleet-wide,
+        # since any vehicle stuck in the shop is worth flagging.
+        low_util = asset.asset_type == OPERATIONAL_ASSET_TYPE and (
+            "Low Utilization" in util.flags or "Available > 30 Days" in util.flags
+        )
+        if low_util:
             _upsert(
                 db,
                 existing,
